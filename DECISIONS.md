@@ -187,3 +187,101 @@ not give historical view counts, so there is no way to know what a 2024 video ha
 Waiting for this data to build up would take years. The era baseline solves the same problem in a
 different way, by comparing videos with their contemporaries. The age-based approach remains
 possible later for videos published from now on, once the maturation curve exists.
+
+
+## 2026-09-18 — Baselines for all three metrics; the metric toggle selects a stored column
+
+**Decision.** `videos` stores `baseline_views`, `baseline_likes` and `baseline_comments`, plus a
+single `baseline_kind` covering all three. The user picks a metric in the filter bar (views, likes
+or comments) and the Outlier Score is then computed against that metric's baseline.
+
+**Why one `baseline_kind` and not three.** The era-versus-current choice depends on the video's age,
+not on the metric, so the window logic is identical for all three. Three copies of the same value
+would be three things that can disagree.
+
+**Why store all three rather than compute on demand.** They come from the same `videos.list`
+response and the same window logic, so the marginal cost is three columns instead of one. Computing
+a baseline at read time would make it depend on user input, which the fixed-baseline decision
+rules out.
+
+**The minimum of 10 is checked per metric independently.** A channel can have 15 videos in the
+window but only 9 with visible like counts. A video may therefore have a views score and no likes
+score, and under that metric it shows "no score" and sorts last.
+
+**Rejected: one combined engagement score.** Likes and comments track views closely, so a separate
+like-outlier would mostly repeat what the views score already said — three numbers on a card, all
+saying the same thing, with the user left to work out why they differ slightly. The metric toggle
+avoids this by only ever showing one.
+
+## 2026-09-18 — Metric and Comparison are two controls that combine
+
+**Decision.** Metric (views / likes / comments) and Comparison (absolute / relative) are separate
+filters, following the Cycling Content Tracker's filter bar. Together they decide the sort:
+absolute sorts on the raw count of the selected metric, relative sorts on the Outlier Score against
+that metric's baseline. Defaults are views and absolute.
+
+**Why both.** They answer different questions. Absolute is "what got the most attention in this
+sector", which large channels dominate by construction. Relative is "what punched above its weight",
+where a small channel's breakout video surfaces. A marketer wants both, at different moments.
+
+**Consequence for unscored videos.** The "sorts last, never dropped" rule only bites under Relative.
+Under Absolute every video has a raw number, so nothing sorts anomalously and nothing needs a
+fallback.
+
+**Consequence for the card.** The Outlier Score is shown under Relative only. Under Absolute there
+is no baseline in play, so a score on the card would be qualifying a number that is not on screen.
+
+## 2026-09-18 — Videos with hidden likes or disabled comments are excluded from that metric's baseline
+
+**Decision.** The YouTube API omits `likeCount` when a creator hides likes and `commentCount` when
+comments are disabled. Both are stored as NULL, and such videos are left out of that metric's
+baseline rather than counted as zero. They still appear in the results and still have a views score.
+
+**Why not zero.** Zero records a disabled feature as an absence of engagement. It would drag the
+median down for every other video on that channel and make the video itself look like a failure
+when nothing was measured at all.
+
+**Why this matters more here than it looks.** Hidden likes are common on brand product launches,
+and this dataset is 170 brands. Postgres arithmetic propagates NULL, so such videos drop out of a
+likes ranking rather than appearing at the bottom of it.
+
+## 2026-09-18 — Shorts classification: duration is a pre-filter, the HEAD check decides
+
+**Decision.** Videos longer than 180 seconds are long-form with no further check. Videos of 180
+seconds or less get a HEAD request to `youtube.com/shorts/{video_id}`: 200 means Short, 303 with a
+`Location` pointing at `/watch?v=` means regular video. This corrects CLAUDE.md, which specified
+duration alone.
+
+**Why.** The Cycling Content Tracker started with duration alone on the basis that it was ~95%
+accurate, and reversed it on 2026-08-19 after manual inspection found regular videos well under
+three minutes on Red Bull Bike and Decathlon — on Decathlon, roughly one in four of those was under
+60 seconds. There is no duration floor that separates the two. Measured impact there: 42 of 90
+videos reclassified per daily run, and 375 of 1,982 existing Shorts rows corrected. The figure does
+not hold for brand channels that publish short product videos as ordinary uploads, and this dataset
+is 170 brands against that project's smaller set.
+
+**Why it is not cosmetic.** `is_short` splits every baseline. A regular video filed as a Short is
+measured against the wrong median and pollutes both pools.
+
+**Send no custom User-Agent.** YouTube routes `/shorts/` through a regional GDPR consent redirect
+and decides eligibility on the User-Agent alone. A realistic Chrome string — the obvious thing to
+send, on the reasoning that it would be treated more normally — funnels every request into the
+consent redirect and returns 302 for everything, with zero discriminating power. It looks like a
+working script returning a consistent answer. Non-browser clients get the real answer.
+
+**Verify before trusting it.** The check is validated against a set of videos of known status before
+it runs over the table. In the Cycling Content Tracker this cost a minute and was the only reason a
+naive implementation did not confidently mislabel 3,000 rows.
+
+**Failures are skipped, not guessed.** A failed HEAD check, and a video with no
+`contentDetails.duration` at all (distinct from `P0D`), both take the skip path and are logged.
+
+## 2026-09-18 — Rejected: comments-per-view as an engagement-rate signal
+
+**Rejected.** A secondary metric of comments or likes per 1,000 views, measuring how hard a video
+landed relative to its reach rather than how far it reached.
+
+**Why not.** Genuinely a different signal from the views score, and declined as scope rather than as
+a bad idea. The metric toggle already gives the user three views of the data, and a fourth number
+with its own interpretation rules is more to explain on a card that is already carrying a score, a
+"still growing" label and four counts.
