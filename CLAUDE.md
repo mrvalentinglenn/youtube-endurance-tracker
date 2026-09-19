@@ -20,7 +20,7 @@ avoid unnecessary abstraction, and prefer boring, well-documented solutions over
 
 | Column | Meaning |
 |---|---|
-| A | Channel / brand name |
+| A | Channel / brand name (used to recognise a row during import; NOT stored — `channels.name` comes from the API) |
 | B | Website (leftover from an earlier script, not used by this app) |
 | C | YouTube channel URL, or the text `no youtube` |
 | D | YouTube channel ID (starts with `UC`) |
