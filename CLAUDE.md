@@ -81,14 +81,20 @@ scheduled run that it actually fired, and keep it in mind after quiet periods.
 - `channels` — channel_id (PK), name, category, subcategory, is_swimming, is_cycling, is_running,
   is_triathlon, uploads_playlist_id, subscriber_count, last_checked_at
 - `videos` — video_id (PK), channel_id (FK), title, description, published_at, duration_seconds,
-  is_short, thumbnail_url
+  is_short, thumbnail_url. `duration_seconds` and `is_short` are both nullable. `is_short` NULL
+  means the Shorts check has not succeeded yet, which is distinct from false: such videos are
+  excluded from both format baselines and match neither side of the Shorts vs long-form filter.
+- `videos` also has a generated `fts` column (tsvector over title + description). Postgres
+  maintains it; ingestion scripts never write to it.
 - `videos` also stores `baseline_views`, `baseline_likes`, `baseline_comments` and `baseline_kind`
   ("era" or "current"), computed during the 30-day run. One `baseline_kind` covers all three, because
   the window logic is identical for each metric. Storing them keeps the score stable between runs and
   makes it explainable in the UI.
-- `video_stats` — id (identity, PK), video_id (FK), captured_at, age_days, views, likes, comments
-  (one row per measurement moment, never overwritten). Unique constraint on
+- `video_stats` — id (identity, PK), video_id (FK), captured_at (date, not timestamp), age_days,
+  views, likes, comments (one row per measurement moment, never overwritten). Unique constraint on
   (video_id, captured_at), so a re-run on the same day updates instead of duplicating.
+  `captured_at` is a date precisely for that reason: with a timestamp, two runs on one day are two
+  different values, the constraint never fires, and the history silently doubles.
 
 Keep the raw measurements in `video_stats` and never overwrite an older measurement: the history is
 what makes growth visible later. Baselines are computed during the 30-day run and stored on the
@@ -122,7 +128,10 @@ the previous run are added in the same job.
 **Retention.** Videos are never deleted for being old. After 180 days a video is frozen, but it stays in the database and remains searchable.
 
 **Descriptions.** Store the full video description. The front-end keyword search runs over title
-plus description, so use Postgres full-text search on both fields.
+plus description, using Postgres full-text search with the `'simple'` configuration: no stemming,
+no stopword removal. The channel set is multilingual, so a language-specific stemmer would apply
+one language's rules to all of them. Any script that rebuilds the `fts` column must use the same
+configuration.
 
 **Shorts vs long-form.** Duration is a pre-filter, not the classification. The Cycling Content
 Tracker started with duration alone and abandoned it: manual inspection found regular videos well
@@ -146,9 +155,12 @@ Verify the check against a set of videos of known status before running it over 
 Cycling Content Tracker this cost a minute and was the only reason a naive implementation did not
 confidently mislabel 3,000 rows.
 
-A video whose HEAD check fails is skipped rather than guessed at, and the skip is logged. So is a
-video with no `contentDetails.duration` at all, which is distinct from `P0D` — neither can be
-classified.
+A video whose HEAD check fails is stored with `is_short` NULL rather than guessed at, and the
+failure is logged. The same holds for a video with no `contentDetails.duration` at all, which is
+distinct from `P0D`. Retry a failed check two or three times within the same run, with a short
+delay: the check hits youtube.com and not the API, so retries cost no quota, and most failures are
+transient connection resets or 429s from Google's CDN. Anything still NULL afterwards is picked up
+by the daily reclassify job.
 
 Store both `duration_seconds` and the resulting `is_short` flag, so the rule can be changed later
 without refetching.
@@ -269,6 +281,8 @@ no score is shown, because there is no baseline in play. Videos younger than 180
   database schema or an ingestion job.
 - Never write ad-hoc scripts that modify the spreadsheet in `data/`. It is read-only input.
 - Ingestion scripts must be re-runnable without creating duplicates (upsert on the primary key).
+- Never write SQL that drops or recreates a table. The initial schema used `CREATE TABLE IF NOT
+  EXISTS`; every change after it is a deliberate `ALTER TABLE`, shown to the owner before it runs.
 - Every script gets a `--test` mode that processes a handful of channels and prints results without
   writing to the database.
 - Keep `NEXT_STEPS.md` up to date: check off what is done, and add newly discovered open questions.

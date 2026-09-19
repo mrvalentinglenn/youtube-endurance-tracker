@@ -23,7 +23,7 @@ Working document. Tick off what is done and add new questions as they come up.
 
 1. [x] **Project setup.** Vite + React + Tailwind in `frontend/`, `.gitignore`, `.env` files for the
        front end and the ingestion, Git repository, initial commit.
-2. [ ] **Supabase setup.** Create the project, create the `channels`, `videos` and `video_stats`
+2. [x] **Supabase setup.** Create the project, create the `channels`, `videos` and `video_stats`
        tables as described in CLAUDE.md, and store the connection details in the `.env` files.
 3. [ ] **Channel import script.** Read the spreadsheet from row 2, skip rows without an ID, write the
        channels into the `channels` table. Re-runnable, upsert on channel_id. Also fetch each
@@ -57,6 +57,9 @@ Working document. Tick off what is done and add new questions as they come up.
 12. [ ] **GitHub Actions workflow.** Schedule the refresh script monthly, with the keys in GitHub
         Secrets, modelled on the Cycling Content Tracker's workflow. Trigger it manually once to
         confirm it works.
+12b. [ ] **Daily Shorts reclassify workflow.** A short script selecting videos with `is_short`
+        NULL, re-running the HEAD check and writing back the result. Scheduled daily via GitHub
+        Actions. Build this only after the classification is proven working in step 4.        
 13. [ ] **Polish for the portfolio.** A short "how it works" page explaining the Outlier Score, plus a
         README with screenshots.
 

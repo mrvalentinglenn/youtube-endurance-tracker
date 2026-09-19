@@ -285,3 +285,52 @@ landed relative to its reach rather than how far it reached.
 a bad idea. The metric toggle already gives the user three views of the data, and a fourth number
 with its own interpretation rules is more to explain on a card that is already carrying a score, a
 "still growing" label and four counts.
+
+## 2026-09-19 — A failed Shorts check stores the video with is_short NULL
+
+**Decision.** A video whose HEAD check fails is written to the database with `is_short` NULL,
+not omitted. It appears in the results, is excluded from both the Shorts and the long-form
+baseline, and is retried later. `is_short` is therefore a nullable column.
+
+**Why.** Omitting the video means refetching and re-checking it on every run, at quota cost,
+and a video that consistently fails would never enter the archive at all. NULL records "format
+unknown" honestly, and gives a retry job something to find: the work queue is simply
+`is_short IS NULL`, which needs no extra columns.
+
+**Consequence for the UI.** These videos match neither side of the Shorts vs long-form filter.
+They are visible only when that filter is off.
+
+## 2026-09-19 — Retrying a failed Shorts check: in-run, plus a daily job
+
+**Decision.** Two layers. The ingestion scripts retry a failed HEAD check two or three times
+within the same run, with a short delay. Whatever still fails is picked up by a separate daily
+GitHub Actions workflow that selects videos with `is_short` NULL and re-checks them.
+
+**Why.** The HEAD check hits youtube.com, not the API, so a retry costs no quota. Most failures
+are transient — connection resets and 429s from Google's CDN, both seen in the Cycling Content
+Tracker. Waiting 30 days for the next refresh to correct a transient failure is unnecessary.
+
+**Not done for now.** No attempt counter. A permanently failing video is retried daily forever;
+with a small set that is harmless. Add a counter only if it becomes a real problem.
+
+## 2026-09-19 — Full-text search uses the 'simple' configuration
+
+**Decision.** The `videos.fts` generated column uses `to_tsvector('simple', title || description)`.
+No stemming, no stopword removal.
+
+**Why.** One configuration has to serve all channels, and the set publishes in English, Spanish,
+German, Dutch, French and Italian. English stemming would apply English rules to words that do not
+fit them. Marketers search for brand, product and race names, which are exactly the words a stemmer
+handles worst. The cost is that "running" does not match "run".
+
+**Reversible.** Changing it means rebuilding one generated column and its GIN index.
+
+## 2026-09-19 — video_stats.captured_at is a date, not a timestamp
+
+**Decision.** `captured_at` is a `date`, defaulting to the current UTC date. The unique constraint
+is on `(video_id, captured_at)`.
+
+**Why.** CLAUDE.md requires a re-run on the same day to update rather than duplicate. With a
+timestamp, two runs on one day produce two different values, the constraint never fires, and the
+measurement history silently doubles. The only thing lost is measuring one video twice in a day,
+which this app never wants.
