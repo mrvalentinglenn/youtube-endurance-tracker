@@ -334,3 +334,52 @@ is on `(video_id, captured_at)`.
 timestamp, two runs on one day produce two different values, the constraint never fires, and the
 measurement history silently doubles. The only thing lost is measuring one video twice in a day,
 which this app never wants.
+
+
+## 2026-09-19 — channels.name comes from the API, not the spreadsheet
+
+**Decision.** The `name` column is filled with the channel title returned by `channels.list`, not
+with column A of the spreadsheet. The spreadsheet name is used only to recognise a row during
+import and to report problems; it is not stored.
+
+**Why.** Channel names in this sector change while the channel ID stays the same. Cycling teams
+rename when a title sponsor changes — Jumbo-Visma became Visma-Lease a Bike on the same channel —
+and the set holds 36 professional teams and 33 race organisers. A stored spreadsheet name would
+slowly fill with sponsors that no longer exist, and the name on a card would not match what the
+user sees after clicking through to YouTube.
+
+**Consequence.** The name is only as current as the last channel fetch, so the refresh run must
+re-fetch it (see below). The API title is sometimes cluttered with taglines or emoji; if that
+becomes a problem in the UI, add a separate override column rather than reverting to the
+spreadsheet.
+
+## 2026-09-19 — The refresh run also re-fetches channel metadata
+
+**Decision.** The 30-day refresh calls `channels.list` for all channels and updates `name` and
+`subscriber_count`, alongside its video work.
+
+**Why.** Names and subscriber counts go stale otherwise, because the import script only runs when
+it is run by hand and the refresh otherwise touches videos only. A renamed team then corrects
+itself within 30 days with no manual action. The cost is about 7 quota units per run, against a
+daily limit of 10,000.
+
+## 2026-09-19 — Channels the API does not recognise are skipped, not stored
+
+**Decision.** If `channels.list` returns nothing for an ID, the channel is not written to the
+database. The import script collects these and prints them at the end, with the spreadsheet name
+beside each ID so they can be looked up.
+
+**Why.** `name` and `uploads_playlist_id` both come from the API, so a channel with no API response
+has no name and no way to find its videos. Storing it would put a permanently broken row in a table
+everything else joins against. The API returns missing IDs silently — a batch of 50 simply comes
+back with 49 results — so without an explicit report, a dead or mistyped ID disappears unnoticed.
+
+## 2026-09-19 — The import never removes channels
+
+**Decision.** A channel that is in the database but no longer in the spreadsheet is left untouched.
+The import script reports these at the end but changes nothing.
+
+**Why.** The foreign key on `videos` is `on delete restrict`, so Postgres refuses to delete a
+channel that has videos, and deleting the videos first would contradict the rule that videos are
+never deleted. The report is still worth having: it catches a mistyped ID, which otherwise shows up
+as a channel that quietly stops updating while a near-duplicate appears next to it.
