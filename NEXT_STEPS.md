@@ -25,7 +25,7 @@ Working document. Tick off what is done and add new questions as they come up.
        front end and the ingestion, Git repository, initial commit.
 2. [x] **Supabase setup.** Create the project, create the `channels`, `videos` and `video_stats`
        tables as described in CLAUDE.md, and store the connection details in the `.env` files.
-3. [ ] **Channel import script.** Read the spreadsheet from row 2, skip rows without an ID, write the
+3. [x] **Channel import script.** Read the spreadsheet from row 2, skip rows without an ID, write the
        channels into the `channels` table. Re-runnable, upsert on channel_id. Also fetch each
        channel's uploads playlist ID and subscriber count via `channels.list`.
 4. [ ] **Verify the Shorts HEAD check.** Assemble a set of videos of known status — real Shorts and
@@ -36,8 +36,9 @@ Working document. Tick off what is done and add new questions as they come up.
        fetch details in batches of 50, and store videos plus a first measurement in `video_stats`.
        Classify Shorts with the HEAD check on everything under 180 seconds. Log quota usage and HEAD
        request counts. Test mode on 5 channels first.
-6. [ ] **Refresh script.** Adds new videos and re-measures videos younger than 180 days. This is the
-       script the 30-day run calls.
+6. [ ] **Refresh script.** Adds new videos and re-measures videos younger than 180 days. Also
+       re-fetches all channels via `channels.list` and updates `name` and `subscriber_count`
+       (~7 quota units). This is the script the 30-day run calls.
 7. [ ] **Outlier Score.** Compute baselines per channel, split by Shorts and long-form, for all three
        metrics (views, likes, comments), and expose the scores through a database view. Videos with
        null likes or comments are excluded from that metric's baseline, and the minimum of 10 is
