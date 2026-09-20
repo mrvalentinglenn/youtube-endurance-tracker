@@ -596,3 +596,73 @@ down, not up, so they do not pollute the top of a Relative ranking.
 imported, not the oldest that exists. The left side of the window is empty because of the import
 boundary, not because of the channel's history. A flag would record an artefact of the dataset
 rather than a property of the data.
+
+## 2026-09-20 — Era baseline_kind, when metrics resolve at different tiers, is by precedence
+
+**Decision.** A video's three metrics can each resolve at a different tier (6-month window,
+12-month window, current-baseline fallback, or none). `baseline_kind` is a single value per video,
+set by precedence: `'era'` if *any* metric resolved from the 6- or 12-month window, else `'current'`
+if *any* metric used the fallback, else `'insufficient'`.
+
+**Why not a 3-way vote.** A literal majority has no answer when a video's three metrics split one
+each way. Precedence is unambiguous to compute and to explain: a video with even one genuinely
+era-quality metric is labelled `'era'`, since that is the more specific and more trustworthy of the
+two comparisons. The failure mode to avoid is the reverse: quietly labelling a video with a real era
+result as merely `'current'`.
+
+## 2026-09-20 — Each write thread needs its own Supabase client
+
+**Decision.** `compute_baselines.py` writes with `WRITE_CONCURRENCY = 10` worker threads (era
+baselines produce far more distinct payloads per channel than step 7's current baseline did, so
+writes can't collapse to one call per format the way step 7's did). Every worker thread builds its
+own Supabase client via `create_client`, kept in thread-local storage. The single shared client from
+`config.py` is still used for this script's reads, which stay single-threaded.
+
+**Why.** The first concurrent run crashed with `httpx.ReadError` / `WinError 10035` ("a non-blocking
+socket operation could not be completed immediately") on a plain read in the main thread, while
+writer threads were concurrently using the same client in the background. `classify_shorts.py`'s
+concurrency never hit this because it uses a `requests.Session` for the YouTube calls, not the
+Supabase/httpx client, for its concurrent work. httpx.Client is documented as thread-safe, but
+sharing it across threads produced a real, repeatable failure on Windows in this setup regardless of
+what the documentation says. Giving each writer thread its own client removed the crash entirely,
+verified by a full 342-channel run completing with 0 write failures.
+
+**Consequence.** Any future script in this project that mixes concurrent writes with the shared
+`supabase` client from `config.py` should use the same thread-local pattern rather than assuming the
+shared client is safe under concurrency on this platform.
+
+
+## 2026-09-20 — Residual growth bias in era baselines is accepted
+
+**Decision.** On channels whose publishing cadence accelerated alongside their growth, old videos
+still score somewhat lower than new ones. This is accepted as a known limitation rather than fixed.
+It belongs in the "how it works" page (step 13), not in a redesign.
+
+**The mechanism.** A calendar-centred window is only balanced when output rate is roughly constant.
+When cadence accelerates, a 6-month window around an old video is dominated by videos from its
+later, more prolific, higher-performing half. The window is balanced in time and lopsided in
+content. Traced by hand on Castelli against raw data: the stored baseline matched a manual
+recomputation exactly, so this is a property of the method, not an implementation error.
+
+**Measured on the three highest-growth channels.** adidas (13.5x growth) is healthy: oldest
+quartile 0.85 against newest 0.59. Castelli Cycling (21.8x) gives 0.57 against 2.05, The Feed
+(28.7x) 0.44 against 0.99. The same old videos under the previous current-baseline-only approach
+scored 0.20 and 0.03 — improvements of 2.85x and 14.7x. The Feed's 0.03 said "catastrophic
+failure" about videos that were probably fine; 0.44 does not.
+
+**Why not fix it.** The obvious remedy is a count-based window (the 10 videos before and 10 after
+in publication order) instead of a calendar one. That trades a known, mild, bounded bias for an
+unknown one: on a channel with a four-month publishing gap, the "contemporaries" are a year apart.
+Redesigning a working system against three data points is the wrong trade. The three channels also
+show residual bias in different directions, which suggests the noise floor of a 20-video median
+rather than a systematic error still to be found. These are the most extreme growth cases out of
+342 channels; a typical channel's residual is much smaller.
+
+## 2026-09-20 — Concurrent writers each get their own Supabase client
+
+**Decision.** Any script writing to Supabase from multiple threads creates a client per thread via
+thread-local storage, never sharing one client across threads.
+
+**Why.** Sharing a single client between the main thread's reads and worker threads' writes crashed
+the first concurrent era-baseline run with a Windows socket error (httpx.ReadError / WinError
+10035). The underlying HTTP connection is not safe to use from several threads at once.

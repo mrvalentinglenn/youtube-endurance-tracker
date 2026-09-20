@@ -7,6 +7,7 @@ Working document. Tick off what is done and add new questions as they come up.
 - [ ] **Does "last year" work as the default date filter?** Chosen provisionally. Check once real
       data is in the database whether it gives a good first impression.
 
+
 ## Data issues in data/channels_complete.xlsx
 
 - [ ] **15 channels are marked `no youtube`** and have no ID. Skip them on import.
@@ -48,13 +49,21 @@ Working document. Tick off what is done and add new questions as they come up.
        a database view, per DECISIONS.md's baseline-in-Python decision ("the score itself is derived
        on read, in a view"). Worth doing after step 8, so the view can be checked against both
        `'current'` and `'era'` rows at once instead of a partially-populated table.
-8. [ ] **Era baselines.** Extend the score computation with the era baseline for mature videos,
-       including the widening fallback and the edge cases at the start and end of a channel's
-       history. Verify on a handful of channels that grew strongly: their old videos should no longer
-       score systematically low.       
+8. [x] **Era baselines.** Extended `ingestion/compute_baselines.py` with the era baseline for mature
+       videos: 6-month window centred on the video's own date, widening to 12 months, falling back to
+       the current baseline, then `'insufficient'`. Done: 342/342 channels, 0 write failures, every one
+       of the 98,300 videos now has a `baseline_kind` (76,404 `'era'`, 20,247 `'current'`, 1,649
+       `'insufficient'`, 0 still `NULL`). See the verification finding below — real improvement, not a
+       complete fix for the steepest-growth channels.
 9. [ ] **Front-end: results list.** Video cards with thumbnail, title, channel, publication date,
        views, likes and comments. Outlier Score shown under Relative only. "Still growing" label on
        videos younger than 180 days.
+9a. [ ] **Score display formatting.** Outlier Scores below 1,000 show one decimal (1.2, 27.4). From
+        1,000 up they are abbreviated: 2,447.8 becomes 2.4K. See DECISIONS.md, 2026-09-20.
+9b. [ ] **Paid-promotion tooltip.** A video on a `Brand` channel with an Outlier Score of 100 or
+        higher shows a tooltip on the score: "Extreme outlier scores may indicate this video was
+        used for paid advertising." Tooltip only, not body text on the card. No other category gets
+        this. See DECISIONS.md, 2026-09-20.
 10. [ ] **Front-end: filters.** Metric (views/likes/comments) and Comparison (absolute/relative),
         keyword search on title + description, category and subcategory, sports, publication date,
         Shorts vs long-form. Metric and Comparison together decide the sort order.
@@ -66,8 +75,9 @@ Working document. Tick off what is done and add new questions as they come up.
 12b. [ ] **Daily Shorts reclassify workflow.** A short script selecting videos with `is_short`
         NULL, re-running the HEAD check and writing back the result. Scheduled daily via GitHub
         Actions. Build this only after the classification is proven working in step 4.        
-13. [ ] **Polish for the portfolio.** A short "how it works" page explaining the Outlier Score, plus a
-        README with screenshots.
+13. [ ] **Polish for the portfolio.** A short "how it works" page explaining the Outlier Score —
+        including the known limitation that on channels which grew explosively, older videos still
+        score somewhat low — plus a README with screenshots.
 
 ## Ideas for later
 

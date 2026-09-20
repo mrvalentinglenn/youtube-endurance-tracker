@@ -129,7 +129,9 @@ then fetch details in batches of 50 with `videos.list`.
 **Refresh cadence.** No daily or weekly job. Every 30 days, refresh the stats of videos that are
 younger than 180 days. A video is therefore measured at roughly 30, 60, 90, 120, 150 and 180 days
 of age. After 180 days a video is frozen: its last measurement is final. New videos published since
-the previous run are added in the same job.
+the previous run are added in the same job. The refresh also re-fetches all channels via
+`channels.list` and updates `name` and `subscriber_count` (~7 quota units), so a renamed channel
+corrects itself within 30 days.
 
 **Retention.** Videos are never deleted for being old. After 180 days a video is frozen, but it stays in the database and remains searchable.
 
@@ -193,11 +195,17 @@ view does only the division: current value over stored baseline.
 *Mature videos (older than 180 days) use an era baseline.* The median all-time value of the selected metric of the
 channel's videos published in a window centred on the video: 6 months before to 6 months after its
 publication date. If that window holds fewer than 10 mature videos of the same format, widen to 12
-months before and after. If it is still under 10, the video gets no score.
+months before and after. If it is still under 10, the fallback below applies.
 
 *Young videos (180 days or younger) use the current baseline.* The median all-time value of the selected metric of the
 channel's videos published between 180 days and 24 months ago. Minimum 10 videos of the same
 format, otherwise no score. These videos carry the "still growing" label in the UI.
+
+*Fallback.* If neither the 6-month nor the 12-month era window holds 10 mature videos of the same
+format, the video is scored against the current baseline instead and `baseline_kind` records
+"current". Only if that also fails does it become "insufficient". When metrics disagree,
+`baseline_kind` is "era" if any metric resolved from a real era window, else "current" if any used
+the fallback, else "insufficient".
 
 **The minimum of 10 is checked per metric independently.** A channel may have 15 videos in the
 baseline window but only 9 with visible like counts, because videos with hidden likes or disabled
@@ -231,15 +239,17 @@ or sport. A filter changes which videos are shown, never how they are scored.
 - A channel without a baseline shows "no score", and is never silently dropped from the results.
 - Videos without a score never sort to the top; they sort last. This only applies under Relative —
   under Absolute every video has a raw number and sorts normally.
-- Guard against a median of zero (no division by zero).
+- A median of exactly 0 is stored as 0, never discarded — it is a real fact about the channel. The
+  divide-by-zero guard lives in the view: a zero baseline yields a NULL score.
 - Compute the window boundaries in UTC, so videos do not shift in and out of the window.
 - A baseline is never built from videos younger than 180 days.
 - The era window is anchored to the video's own publication date, never to the current date. A frozen
   video's score must not change between runs unless new videos from its era were added.
 - When the window is widened from 6 to 12 months, the widening applies to both sides.
-- A video at the edge of the dataset (the channel's oldest or newest videos) has a one-sided window.
-  Handle this explicitly: either accept it or give no score, but never silently compare against a
-  half window without noting it.
+- A video at the edge of the dataset has a one-sided window. This is accepted: if 10 qualifying
+  videos exist, the median is computed regardless of how they sit around the video, and nothing
+  flags it. The left edge is an artefact of the 36-month import boundary, not the channel's real
+  history. See DECISIONS.md, 2026-09-20.
 - A video with a null likes or comments count is excluded from that metric's baseline, never counted
   as zero. Postgres arithmetic propagates NULL, so such videos drop out of that ranking rather than
   appearing artificially poor.  
@@ -293,6 +303,9 @@ no score is shown, because there is no baseline in play. Videos younger than 180
   database schema or an ingestion job.
 - Never write ad-hoc scripts that modify the spreadsheet in `data/`. It is read-only input.
 - Ingestion scripts must be re-runnable without creating duplicates (upsert on the primary key).
+  But a script writing only some columns of an existing row uses `.update()`, never `.upsert()`:
+  Postgres checks NOT NULL on the proposed insert row before checking for a conflict, so a partial
+  payload fails on `channels.videos.channel_id` even when the row already exists.
 - Never write SQL that drops or recreates a table. The initial schema used `CREATE TABLE IF NOT
   EXISTS`; every change after it is a deliberate `ALTER TABLE`, shown to the owner before it runs.
 - Every script gets a `--test` mode that processes a handful of channels and prints results without
@@ -300,3 +313,6 @@ no score is shown, because there is no baseline in play. Videos younger than 180
 - Keep `NEXT_STEPS.md` up to date: check off what is done, and add newly discovered open questions.
 - Record settled decisions in `DECISIONS.md`, with the date and the reasoning, and remove the
   question from `NEXT_STEPS.md`. Never put decisions in `NEXT_STEPS.md`.
+- A script writing to Supabase from multiple threads creates one client per thread via thread-local
+  storage. Sharing a client across threads crashes on Windows (httpx.ReadError / WinError 10035).  
+
