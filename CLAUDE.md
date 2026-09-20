@@ -98,6 +98,12 @@ scheduled run that it actually fired, and keep it in mind after quiet periods.
   (video_id, captured_at), so a re-run on the same day updates instead of duplicating.
   `captured_at` is a date precisely for that reason: with a timestamp, two runs on one day are two
   different values, the constraint never fires, and the history silently doubles.
+- `videos_scored_live` — a plain view holding the scoring query: the join to `channels`, the
+  `DISTINCT ON` over `video_stats` for each video's latest measurement, and the three score
+  divisions. The logic lives here and nowhere else.
+- `videos_scored` — a materialised view over `videos_scored_live`, carrying the indexes, and the
+  only object the front end reads. It keeps the name the front end already uses, so the read
+  contract is unchanged. Refreshed by the ingestion run, never by the front end.  
 - A video's current value for a metric is always the most recent `video_stats` row for that video,
   read on demand. `videos` deliberately holds no denormalised `latest_views` columns: a derived
   copy can silently disagree with the source, and a score computed from a stale number is
@@ -267,19 +273,43 @@ failure.
 **No view modes.** The app has no fixed time windows like the 7-day and 90-day views of the Cycling
 Content Tracker. Time is controlled entirely through the publication-date filter below.
 
+**Two routes.** `/` is the homepage: one section per category, in fixed order, each showing that
+category's top videos under the current filters. `/category/:category` shows one category's full
+ranking, 60 videos. A "Show more" button inside each homepage section navigates to that category's
+page, carrying the current filters.
+
+**Section order is fixed:** Brands, Influencers, Professional Athletes, Professional Teams, Race
+Organizers. A product decision, not alphabetical and not by size.
+
+All categories are visible on one page by default — the cross-category view is the point. A
+marketer wants to see what teams are doing next to what brands are doing, without navigating.
+
+Each section fetches independently and renders and fails on its own, so one slow or broken section
+cannot blank the page.
+
 Filters the user can combine:
 
 1. Metric: views, likes or comments. Default: views.
 2. Comparison: absolute or relative. Default: absolute.
 3. Keyword search over title + description
-4. Category and subcategory (multi-select)
-5. Sport: swimming, cycling, running, triathlon (multi-select)
-6. Publication date: last 6 months, last year, last 2 years, last 3 years, all time, or a custom
+4. Category (multi-select). On the homepage it decides which sections appear: all are selected by
+   default, and deselecting one removes its section. On a category page it decides which categories
+   are merged into the ranked list. The last remaining category cannot be deselected, so neither
+   page can reach zero results — an empty page reads as broken rather than as filtered.
+5. Subcategory (multi-select). Filters which videos appear inside the sections, never which sections
+   exist. Subcategories are per category in the data (`Brand > Nutrition`, `Race Organizer >
+   Running Races`), so the control is grouped by category: deselecting `Brand > Nutrition` must not
+   affect anything under another category.
+6. Sport: swimming, cycling, running, triathlon (multi-select). Global — one set of toggles
+   applying to every section, not per category. A channel is shown if it carries **at least one**
+   selected sport. So deselecting cycling still shows a helmet brand tagged both cycling and
+   triathlon, and removes a channel tagged cycling alone.
+7. Publication date: last 6 months, last year, last 2 years, last 3 years, all time, or a custom
    period. "All time" means no date restriction on the query: everything in the database.
    Default on opening the app: last year.
-7. Format: Shorts or long-form. This is a required choice, not an optional filter — the two
-   formats are never mixed in one grid, because their thumbnails have different aspect ratios and
-   their view scales are not comparable. Default: [PENDING].
+8. Format: Shorts or long-form. This is a required choice, not an optional filter — the two formats
+   are never mixed in one grid, because their thumbnails have different aspect ratios and their view
+   scales are not comparable. Default: long-form.
 
 Metric and Comparison together decide the sort order:
 
@@ -300,13 +330,55 @@ comments. Under Relative it also shows the Outlier Score for the selected metric
 no score is shown, because there is no baseline in play. Videos younger than 180 days carry a
 "still growing" label. Clicking through opens the video on YouTube.
 
-**Score display.** Outlier Scores below 1,000 show one decimal (1.2, 27.4). From 1,000 up they are
-abbreviated: 2,447.8 becomes 2.4K.
+**Score display.** The Outlier Score is shown as a multiple with an explicit `×`, to one decimal:
+`1.2×`, `27.4×`. From 1,000 up the number is abbreviated and keeps the multiplier: `2,447.8`
+becomes `2.4K×`, `21,553.9` becomes `21.6K×`. The `×` is what makes the ban on percentages
+self-enforcing — a multiple cannot be misread as a share of something.
 
 **Card layout.** The Outlier Score sits in a badge on the top left of the thumbnail. The "still
 growing" label is a badge on the top right, in the style of the Cycling Content Tracker's
 "Provisional" label. Views, comments and likes are shown with icons rather than words. The grid
 shows 4 cards per row at full width.
+The "still growing" badge appears under both Absolute and Relative. Unlike the score it accompanies,
+it states a fact about the video rather than about a measurement, and it reads differently either
+way: under Relative it explains a low score, and under Absolute it marks a video that reached a high
+raw count without the head start a mature video had.
+
+A duration badge sits bottom-right of the thumbnail, from `duration_seconds`. Format as YouTube
+does: `M:SS` below an hour, `H:MM:SS` at or above it — 4,400 videos in the archive run over an hour,
+mostly full-race broadcasts, so this is one card in twenty rather than an edge case. A
+`duration_seconds` of NULL or 0 shows no badge: 0 comes from the API's `P0D`, which means the
+duration is unavailable rather than that the video is zero seconds long, and `0:00` on a card reads
+as a bug.
+
+Each card carries its rank — `#1`, `#2`, `#3` — above the thumbnail. Rank is positional: it is the
+row's index in the returned set plus the page offset, never a stored column. A video's rank depends
+entirely on the current filters and sort, so there is nothing to store and nothing that can go
+stale. The helper that derives it takes an offset from the start, so pagination does not require
+rewriting it.
+
+**Thumbnail shape and grid.** Long-form thumbnails are 16:9, Shorts are 9:16. Because the format
+filter is a required choice, each grid holds exactly one aspect ratio. Columns differ by format:
+long-form 1 / 2 / 3 / 4 across mobile / tablet / laptop / wide, Shorts 3 / 4 / 5 / 5. Long-form
+stacks on mobile because a 16:9 thumbnail at a third of a 375px screen is about 110px wide, too
+small to read a title against, while a portrait Short survives that width. A single page size of 60
+serves both formats: it divides cleanly into every column count above, so neither grid ends on a
+ragged row.
+Those counts are the category page. The homepage shows fewer per section: long-form 1 / 3 / 3 / 3
+across mobile / tablet / laptop / wide, Shorts 3 / 3 / 5 / 5. Shorts always fetch 5 and the 4th and
+5th are hidden below laptop in CSS, so the row count is never read from the viewport in JavaScript
+and there is no screen-size state to keep in sync. Shorts cards carry a height cap, so a Shorts
+section stays roughly as tall as a long-form one.
+
+**The front end reads `videos_scored` and never computes a score.** It is a materialised view, so
+reads are fast regardless of cache state, and the scoring logic can change in SQL with no front-end
+work.
+
+**The card never carries a fixed width.** It is `w-full` and takes the width its grid cell gives it,
+deriving height from aspect-ratio classes. The Cycling Content Tracker lost a session to this: a
+hardcoded width does not shrink into a narrower grid cell, so the card overflowed, consumed the grid
+gap, and later grid items painted over its badges — three symptoms that looked like separate spacing
+bugs and were one cause.
 
 **Paid-promotion note.** A video on a channel in the `Brand` category is flagged when **any** of its
 three Outlier Scores — views, likes or comments — is 500 or higher. The rule reads all three
@@ -345,5 +417,13 @@ DECISIONS.md, 2026-09-20.
 - Record settled decisions in `DECISIONS.md`, with the date and the reasoning, and remove the
   question from `NEXT_STEPS.md`. Never put decisions in `NEXT_STEPS.md`.
 - A script writing to Supabase from multiple threads creates one client per thread via thread-local
-  storage. Sharing a client across threads crashes on Windows (httpx.ReadError / WinError 10035).  
+  storage. Sharing a client across threads crashes on Windows (httpx.ReadError / WinError 10035).
+- The refresh run refreshes `videos_scored` as its last step, and only after its own checks have
+  passed: a run that failed must not publish its data to the site. A failed refresh fails the run,
+  with an error message naming it. A materialised view that silently stops refreshing is the one
+  failure mode this project cannot otherwise see.
+  - `videos_scored_live` holds the scoring query; `videos_scored` is a materialised copy of its
+  output and is the only object the front end reads. Change scoring in the live view and refresh —
+  never edit the materialised view, which is `select * from` the live one precisely so the logic
+  cannot exist in two places.
 

@@ -5,6 +5,21 @@ import VideoCard from './components/VideoCard'
 const METRICS = ['views', 'likes', 'comments']
 const COMPARISONS = ['absolute', 'relative']
 
+// Format is a required choice (CLAUDE.md); hardcoded to long-form for now, matching
+// videos.js's hardcoded filter. Step 10 replaces both with a real control.
+const IS_SHORT = false
+
+const GRID_COLUMNS = {
+  false: 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4', // long-form
+  true: 'grid-cols-3 sm:grid-cols-4 lg:grid-cols-5', // Shorts
+}
+
+// Positional, not stored: a video's rank belongs to the current query, not the video
+// itself. Takes an offset so pagination (not built yet) won't need to rewrite this.
+function rankFor(index, offset = 0) {
+  return offset + index + 1
+}
+
 function label(word) {
   return word[0].toUpperCase() + word.slice(1)
 }
@@ -82,9 +97,16 @@ export default function App() {
       {loading && !error && <p className="text-gray-500">Loading…</p>}
 
       {!loading && !error && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {rows.map((video) => (
-            <VideoCard key={video.video_id} video={video} metric={metric} comparison={comparison} />
+        <div className={`grid ${GRID_COLUMNS[IS_SHORT]} gap-4`}>
+          {rows.map((video, index) => (
+            <VideoCard
+              key={video.video_id}
+              video={video}
+              metric={metric}
+              comparison={comparison}
+              rank={rankFor(index)}
+              isShort={IS_SHORT}
+            />
           ))}
         </div>
       )}

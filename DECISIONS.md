@@ -553,6 +553,9 @@ Implement the amendments.
 
 ## 2026-09-20 — Scores of 1,000 and above are displayed as 2.4K
 
+**Amended 2026-09-20** by "The Outlier Score is displayed as a multiple, with K above 1,000". The K
+abbreviation stands; the format gains an explicit `×`.
+
 **Decision.** Outlier Scores below 1,000 show one decimal (1.2, 27.4). From 1,000 up they are
 abbreviated: 2,447.8 becomes 2.4K.
 
@@ -736,7 +739,10 @@ in the advertiser's Google Ads account. Both texts therefore say "may".
 ## 2026-09-20 — Shorts vs long-form is a required choice, not an optional filter
 
 **Decision.** The format filter always has a value. The user sees either Shorts or long-form, never
-both in one grid. Default on opening: [PENDING].
+both in one grid. Default on opening: long-form. Shorts view counts are inflated by autoplay, so opening on them sets
+a misleading scale for the whole page, and long-form is where the Outlier Score comparison is most
+useful to a marketer looking for something to imitate. The Cycling Content Tracker defaults the
+same way.
 
 **Why.** The two formats have different thumbnail aspect ratios, so a mixed grid is ragged or
 forces one format into the other's shape. Their view scales are not comparable either — the
@@ -799,3 +805,231 @@ property of the video, so it is computed once from all three columns and display
 from views, so 500 does not mean the same thing across them. Calibrating three thresholds needs
 three rounds of the band inspection that produced the first one, and the single threshold already
 catches both shapes. Revisit only if the note turns out to fire on videos that are plainly organic.
+
+## 2026-09-20 — The Outlier Score is displayed as a multiple, with K above 1,000
+
+**Decision.** One decimal and an explicit `×`: `1.2×`, `27.4×`. From 1,000 up the number is
+abbreviated and keeps the multiplier: `2.4K×`, `21.6K×`.
+
+**Why the multiplier.** CLAUDE.md bans presenting the score as a percentage, because "180% of
+normal" invites reading a ratio as a share rather than as a multiple of a median. A bare number
+satisfies the ban only by omission; `×` satisfies it directly, and a badge reading `21.6K×` is
+legible without its caption — which matters once the score is a badge on a thumbnail rather than a
+labelled line of body text. Taken from the Cycling Content Tracker, where it is a settled
+convention.
+
+**Why K is still needed here.** That project's top score was about 75, so abbreviation never arose.
+This dataset reaches 21,553.9, and a raw `21,553.9×` beside a `1.2×` dominates the grid and is
+harder to read than the shorter form.
+
+## 2026-09-20 — The "still growing" badge appears under both comparisons
+
+**Decision.** The badge shows on every video younger than 180 days, under Absolute as well as
+Relative.
+
+**Why not gate it on Relative.** The obvious precedent says gate it: the Cycling Content Tracker
+gated its Provisional badge to Relative on 2026-09-01, because Provisional qualifies a baseline and
+Absolute has no baseline in it — the badge was caveating a number that was not on screen.
+
+That reasoning does not transfer. Provisional is a statement about the measurement. "Still growing"
+is a statement about the video: it is under 180 days old, which is true whatever is being ranked.
+
+**Why it earns its place under Absolute.** It changes meaning rather than losing it. Under Relative
+it explains a low score. Under Absolute it marks a video that reached a high raw count without the
+head start every mature video in the ranking had — which makes the result more impressive, not
+less. Same badge, opposite implication, useful in both.
+
+## 2026-09-20 — Thumbnail aspect ratios and grid columns, adapted from the Cycling Content Tracker
+
+**Decision.** Long-form 16:9, Shorts 9:16. Columns: long-form 1 / 2 / 3 / 4 across mobile / tablet /
+laptop / wide, Shorts 3 / 4 / 5 / 5. One page size of 60 for both formats.
+
+**Why two column sets rather than one.** The formats have different shapes, so a single set cannot
+serve both. The Cycling Content Tracker measured the binding case: a 16:9 thumbnail at a third of a
+375px screen is about 110px wide, too small to read a title against, while a portrait Short at the
+same width is still legible. Hence long-form stacking on mobile and Shorts running three across.
+
+**Why one column fewer than that project at every breakpoint.** Their numbers are long-form
+1 / 2 / 4 / 5 and Shorts 3 / 4 / 6 / 6. This app's cards carry more — a score badge, a "still
+growing" badge, a paid-promotion note and three counts — so they need more width to stay readable.
+
+**Why one page size where that project has two.** They run 20 for long-form and 24 for Shorts
+because at that size the divisibility mismatch shows: 20 leaves a ragged last row on 3, 4 and 6
+columns. 60 divides cleanly into every column count in both sets, so the split is unnecessary and
+there is one fewer number to keep in sync between the query and the display.
+
+**Hard rule that comes with this.** The card is never given a fixed width. That project spent a
+session on three symptoms — no gap between cards, a clipped duration badge, a badge cut off by its
+neighbour — that turned out to be one cause: a hardcoded `w-56` does not shrink into a narrower grid
+cell, so the card overflowed its own cell and later grid items painted over it. `w-full` plus
+aspect-ratio classes; the cell decides the width.
+
+## 2026-09-20 — The card carries a duration badge
+
+**Decision.** Bottom-right of the thumbnail, formatted as YouTube does it (`0:39`, `22:14`), read
+from `duration_seconds`, which is added to the `videos_scored` view for this. A NULL duration shows
+no badge rather than a placeholder.
+
+**Why.** It is standard YouTube vocabulary, so it needs no explaining, and it separates two kinds of
+content the card otherwise cannot distinguish. This dataset makes that concrete: VAUDE's top scorer
+is a 22-minute documentary and the extreme Brand scorers are 15 to 37 seconds — the same grid, the
+same score range, entirely different work to imitate. Without the badge the only cue is the
+thumbnail.
+
+**Cost.** One column on the view and a formatter on the card.
+**Two things the formatter must handle.** 4,400 videos (4.5% of the archive) run over an hour, so
+`H:MM:SS` is a normal case rather than a guard — Race Organizer channels publish full-race
+coverage, the longest being just under 12 hours. And 53 videos carry a duration of 0 from the API's
+`P0D`, which means unavailable rather than zero-length; they take the no-badge path alongside NULL.
+
+## 2026-09-20 — Rank is shown on the card and derived positionally
+
+**Decision.** Each card shows `#1`, `#2`, `#3` above the thumbnail, derived from the row's position
+in the returned set plus the page offset. No rank column exists on the view or in the database.
+
+**Why show it.** Without it the grid is 60 videos in an order the user has to infer. The top-left
+card and the twelfth look equally weighted, so the ranking — which is what the filters actually
+produce — is invisible. The Cycling Content Tracker numbers its cards for the same reason.
+
+**Why positional and not stored.** A video's rank is a property of the current query, not of the
+video: #1 under Views Absolute and possibly #340 under Comments Relative. Storing it would mean six
+columns, all recomputed on every ingestion run, all capable of disagreeing with what the page
+actually returned.
+
+**One thing the helper must get right.** It takes an offset, so the first row of page 2 is #61
+rather than #1. Pagination does not exist yet, but building the offset in now means it is not a
+rewrite later. The Cycling Content Tracker records the matching failure on its own page-size
+helper: when the number used for the query and the number used for the rank diverge, videos are
+silently skipped or repeated between pages and the list still looks entirely plausible.
+
+## 2026-09-20 — Scoring moves to a materialised view
+
+**Decision.** Two objects. `videos_scored_live` holds the query exactly as it is today — the join,
+the `DISTINCT ON`, the three divisions — and remains the only place the scoring logic exists.
+`videos_scored` becomes a materialised view over it and takes the existing name, so nothing in
+`frontend/` changes: no query, no column, no contract. The refresh run refreshes it as its final
+step, after its own checks pass.
+
+**Why.** Measured with `explain analyze` on the app's default query — Views, Absolute, last year,
+60 rows. Cold: 7,255ms. Warm: 370ms. A later run that would not warm up: 3,780ms. `anon` carries a
+3-second statement timeout, so a visitor arriving on a cold cache gets a failure — and that visitor
+is precisely someone opening the link for the first time, which is the whole audience for a
+portfolio piece.
+
+**Where the time goes.** Reading rows from `videos`: about 6,500 heap blocks for 18,136 rows, 2.5s
+of the total. The `DISTINCT ON` walks all 98,300 `video_stats` rows regardless of how few videos the
+date filter leaves, adding roughly 1s, and the merge sort then spills to disk. The free tier does
+not hold this working set in memory, so the cold cost recurs rather than being a first-load tax.
+
+**Why not the cheaper levers.** Dropping `fts` from the view was tested and made no measurable
+difference — the heap blocks were unchanged — and it would have complicated step 10's keyword
+search, so it was restored. Denormalising the latest stats onto `videos` was rejected on 2026-09-20
+and that reasoning stands: a derived copy can silently disagree with `video_stats`, and a score
+computed from a stale number is indistinguishable from a real one. It would also remove only the
+1s, leaving the 2.5s heap scan. Upgrading Supabase fixes it for $25 a month and is the wrong answer
+for a portfolio project — "I measured it and moved the computation" is a better account than "I
+bought more memory".
+
+**The objection, and its answer.** A materialised view can go stale silently: a refresh that stops
+working leaves the site serving old numbers with no error and no visible difference. That is the
+failure mode this project works hardest to avoid everywhere else. The answer is to make the refresh
+part of the run's success criteria — it runs last, only after the run's checks pass, and a failed
+refresh fails the run. A broken refresh is then exactly as loud as a broken ingestion. The Cycling
+Content Tracker reached the same conclusion by the same route: it chose a live view first, measured
+it once real data existed, and switched when the measurement said so.
+
+**Access-control consequence, stated rather than glossed.** RLS does not apply to materialised
+views, and they cannot be `security_invoker` — they read the underlying tables as their owner. This
+exposes nothing new here, since the current view is deliberately `security_invoker = false` for the
+same reason and everything in it is public YouTube data. But it is a real deviation from the
+tables-sealed model and needs re-examining if any table it reads ever holds something `anon` should
+not see.
+
+**Indexes are the point.** A live view cannot be indexed on its own output; a materialised one can.
+It needs a unique index on `video_id` — both because the view guarantees one row per video and
+because `REFRESH MATERIALIZED VIEW CONCURRENTLY` requires one — plus an index per sort column with
+`nulls last` written into the definition, so it matches what the front end actually asks for. A
+DESC index defaults to NULLS FIRST, and without the match Postgres sorts on top of the index rather
+than reading rows out in final order.
+
+**Reversible.** The rename is the rollback: `videos_scored_live` is the current view unchanged, so
+pointing the front end back at it is one statement and nothing is deleted at any stage.
+
+**Built and measured, 2026-09-20.** 0.885ms on the query that was timing out, against 7,255ms cold.
+The plan is the reason rather than the number: an index scan on `videos_scored_views_idx` reading
+218 entries and stopping at 60, where the live view joined two tables, ran a `DISTINCT ON` over all
+98,300 `video_stats` rows and sorted 18,136 results. The `nulls last` written into the index
+definitions is what lets it read rows out in final order — without the match Postgres would have
+sorted on top of the index and won back little.
+
+**One thing worth knowing for future checks.** `information_schema.role_table_grants` does not
+report grants on materialised views, so a query against it shows `anon` with no SELECT even when
+the grant is correct. Read `pg_class.relacl` instead: `anon=r` is the SELECT. Checking the wrong
+catalog here would look exactly like a missing grant.
+
+## 2026-09-20 — The homepage is category sections; "Show more" is navigation
+
+**Decision.** Two routes. `/` shows one section per category in fixed order — Brands, Influencers,
+Professional Athletes, Professional Teams, Race Organizers — each with that category's top videos
+under the current filters. `/category/:category` shows one category's full ranking, 60 videos,
+reached by a "Show more" button inside each section that carries the current filters. This replaces
+the flat 60-video list built in step 9.
+
+**Why sections rather than one merged ranking.** The cross-category comparison is the product. A
+marketer wants to see what teams are doing beside what brands are doing, and a single merged list
+buries the smaller categories — Brands has 170 channels against Race Organizers' 33, so a flat
+ranking is mostly Brands. Sections give every category the same three slots regardless of size.
+
+**Why each section fetches independently.** One query per section rather than one gathering query,
+so a section renders and fails on its own and a slow or broken one cannot blank the page. Parallel
+by construction rather than by a Promise.all that has to be kept parallel deliberately. Taken from
+the Cycling Content Tracker.
+
+**Why "Show more" navigates rather than expanding.** The category page repeats the ranking from #1,
+so the videos already seen appear again at the top. Nothing is on screen twice, because the
+homepage is gone. It also keeps the page boundaries on round numbers.
+
+## 2026-09-20 — What each filter does, now that the homepage is sectioned
+
+**Decision.** Category, subcategory and sport each act at a different level.
+
+*Category* decides which sections exist. All selected by default; deselecting one removes its
+section. The last remaining category cannot be deselected.
+
+*Subcategory* filters videos inside the sections and never removes a section. The control is
+grouped by category, because subcategories are per category in the data — deselecting `Brand >
+Nutrition` must not affect `Race Organizer > Running Races`.
+
+*Sport* is global: one set of four toggles applying to every section, not one set per category. A
+channel is shown if it carries at least one selected sport.
+
+**Why the last category cannot be deselected.** Zero sections is a blank page, which reads as a
+broken site rather than as a filter returning nothing. The same rule the Cycling Content Tracker
+applies to its category button row.
+
+**Why sport matches on "at least one" rather than "all".** Channels carry multiple sports, and the
+overlap is the useful part: a helmet brand tagged both cycling and triathlon should survive cycling
+being deselected, because the user is still interested in triathlon. Requiring every selected sport
+would instead show only channels tagged with all of them, which is almost nothing.
+
+**Why sport is global and not per category.** Twenty toggles against four, for a use case nobody
+could name — wanting cycling under Brands but not under Teams. The saving in control surface is
+large and the loss is hypothetical.
+
+## 2026-09-20 — Five triathlon influencers were wrongly tagged as cycling
+
+**Decision.** The Triathlon Hour, The Daily Tri, Global Triathlon Network, Pro Tri News and
+Jenna & Miguel - Freestyle Tri had column H (cycling) cleared in
+`data/channels_complete.xlsx`; column J (triathlon) is unchanged. Sheet-wide non-empty column H
+went 215 → 210.
+
+**Why this is recorded as a decision.** CLAUDE.md says the spreadsheet is read-only input and no
+script may modify it. This was a deliberate, one-off exception, requested explicitly, and the
+script used to make the edit was deleted afterwards so nothing in the repo can repeat it. The rule
+stands.
+
+**Consequence.** Sport tags are filter metadata, not scoring inputs, so no baseline changes and
+nothing is recomputed. But the flags live in three places: the spreadsheet, the `channels` table,
+and the materialised `videos_scored`. The edit only touched the first. Until the import script
+re-runs and the view is refreshed, the app still filters on the old tags — which is the first real
+instance of the refresh obligation this file records elsewhere.

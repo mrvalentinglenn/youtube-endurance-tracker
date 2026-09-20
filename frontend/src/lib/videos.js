@@ -15,6 +15,7 @@ const SELECT_COLUMNS = [
   'title',
   'thumbnail_url',
   'published_at',
+  'duration_seconds',
   'channel_name',
   'category',
   'views',
@@ -36,6 +37,9 @@ export async function fetchVideos({ metric = 'views', comparison = 'absolute' } 
     .from('videos_scored')
     .select(SELECT_COLUMNS)
     .gte('published_at', cutoff.toISOString())
+    // Format is a required choice (CLAUDE.md), hardcoded to long-form for now. Step 10
+    // replaces this with a real Shorts/long-form control.
+    .eq('is_short', false)
     // nullsFirst: false is load-bearing, not stylistic: Postgres sorts NULLs first on a
     // descending sort by default, which would put every unscored video at the top of
     // the Relative view -- exactly the hard rule CLAUDE.md forbids.
