@@ -383,3 +383,136 @@ The import script reports these at the end but changes nothing.
 channel that has videos, and deleting the videos first would contradict the rule that videos are
 never deleted. The report is still worth having: it catches a mistyped ID, which otherwise shows up
 as a channel that quietly stops updating while a near-duplicate appears next to it.
+
+## 2026-09-19 — The backfill runs in two phases
+
+**Decision.** Phase one does all the YouTube API work: walk each channel's uploads playlist, fetch
+details in batches of 50, write the video rows and a first `video_stats` measurement. Anything at
+or under 180 seconds is written with `is_short` NULL. Phase two walks the NULL rows and classifies
+them with the HEAD check.
+
+**Why.** Nobody knows how many HEAD checks the set needs until the videos are in the database — it
+depends on how much of 342 channels' output falls under 180 seconds, and brand channels publish a
+lot of it. One pass commits to an unknown runtime before that number is visible. Splitting it means
+phase one finishes in under an hour, a single query then gives the exact count, and the throttling
+decision is made against a real number.
+
+**Bonus.** Phase two's work queue is `is_short IS NULL`, so it is resumable for free, and it is the
+same script as the daily reclassify job (step 12b). It is not written twice.
+
+## 2026-09-19 — The backfill resumes on last_checked_at
+
+**Decision.** Phase one sets `channels.last_checked_at` when a channel finishes without error, and
+skips any channel that already has a timestamp. A `--force` flag redoes a channel deliberately.
+
+**Why.** 342 channels of network calls will eventually break halfway, and restarting from zero
+wastes quota on work already done. Setting the timestamp at the end rather than the start is the
+point: a channel that crashed mid-way keeps its NULL and is retried on the next run. Deriving
+progress from "does this channel have videos" cannot tell a finished channel from a half-finished
+one, and would leave the latter permanently incomplete.
+
+## 2026-09-19 — Playlist paging stops after 5 consecutive videos outside the window
+
+**Decision.** Walking a channel's uploads playlist stops once 5 videos in a row fall outside the
+36-month window, not at the first one. Publication dates are read from
+`contentDetails.videoPublishedAt`, never `snippet.publishedAt`.
+
+**Why.** The uploads playlist is usually newest-first but not strictly: a video made private and
+later restored, or re-uploaded, sits out of order. Stopping at the first old video lets one stray
+entry truncate a channel's history silently, with no error to notice. Five consecutive costs at
+most one extra API call per channel, and usually none, since 50 videos arrive per call.
+
+**Why videoPublishedAt.** `snippet.publishedAt` is when the video was added to the playlist. For
+most videos these match, but they diverge on exactly the restored and re-uploaded videos that cause
+the disorder in the first place.
+
+## 2026-09-20 — Shorts HEAD checks run at concurrency 20, no delay
+
+**Decision.** Phase two of the backfill, and the future daily reclassify job (same script,
+`ingestion/classify_shorts.py`), fire HEAD requests at `youtube.com/shorts/{id}` at concurrency 20
+with no artificial delay between requests.
+
+**Why.** Two calibration runs (`ingestion/calibrate_shorts.py`) against real videos: 500 requests
+sequential came back 0 failures, 0 429s, 409/91 Shorts-to-video split, median 1,505ms / p95 2,399ms.
+500 requests at concurrency 20 came back 0 failures, 0 429s, a 406/94 split (0.6 points from the
+sequential run), and statistically unchanged response times (median 1,447ms / p95 2,416ms) — meaning
+20 requests in flight weren't queuing behind each other or any server-side gate. A delay would have
+bought nothing either way: the 1.5-second response time is network latency, not throttling, so there
+was no idle gap to add one to.
+
+The real backfill run (62,215 videos) confirmed it at full scale: 0 failures, 0 429s, no trip of the
+drift guard (rolling 1,000-video window, 10-point tolerance from the ~82/18 baseline), effective rate
+~14.4 req/s.
+
+**Guardrails kept for the real run, not just the calibration.** Abort immediately on any 429; abort
+on more than 50 consecutive request failures; abort if the rolling 1,000-video 200/303 split drifts
+more than 10 points from baseline (a sign of a consent/interstitial redirect that returns plausible
+but uninformative status codes — see the User-Agent decision above). The work queue is shuffled
+before processing so that window is a cross-section of channels, not one Shorts-heavy brand's
+contiguous run.
+
+**Two real bugs hit and fixed while building this, both worth remembering for future scripts that
+write is_short or similar columns in bulk:**
+
+1. **Never `.upsert()` a partial column set to update existing rows.** `.upsert()` goes through
+   Postgres's `INSERT ... ON CONFLICT DO UPDATE`, and Postgres checks NOT NULL constraints on the
+   *proposed insert row* before it even checks for a conflict — so upserting just `{video_id,
+   is_short}` fails on `channel_id NOT NULL`, even though the row already exists and would only be
+   updated. `.update({...}).in_("video_id", ids)` has no INSERT path and cannot hit this. The
+   `last_checked_at` write in the backfill (phase one) already used `.update()` for the same reason;
+   phase two initially didn't, and it crashed on the very first batch, before writing anything.
+2. **A ~74-minute run needs DB write retries even when the HTTP requests deliberately have none.**
+   The YouTube HEAD checks are retry-free on purpose, so the failure and 429 counts stay real signal
+   for the abort guards. But a long run also does hundreds of Supabase writes, and one hit a
+   transient Postgres statement timeout (`57014`) after 47,500 clean requests. Retrying the DB write
+   (3 attempts, 2s apart) doesn't hide anything the abort conditions care about, so phase two retries
+   those specifically. Resumability (`is_short IS NULL`) meant the crash cost nothing beyond needing
+   a second invocation — the ~500 videos in the failed batch simply stayed NULL and were reclassified
+   on the next run.
+
+   ## 2026-09-20 — A video's current value is read from the latest video_stats row
+
+**Decision.** The front-end view joins each video to its most recent `video_stats` row, computed on
+read. `videos` does not carry denormalised `latest_views`, `latest_likes` or `latest_comments`
+columns. An index on `video_stats (video_id, captured_at desc)` supports this.
+
+**Why.** `video_stats` is the source of truth, and a derived copy can silently disagree with it: if
+a refresh run fails after writing the measurement but before updating the copy, the site shows a
+stale number and the score computed from it looks exactly like a real score. Both backfill phases
+already crashed mid-run — once on a Unicode error, once on a statement timeout — so this is a
+realistic failure, not a theoretical one.
+
+**Why the cost is acceptable.** Most of the archive is frozen: a video older than 180 days has
+exactly one measurement forever. Only videos under 180 days accumulate rows, and they cap at six.
+
+**Reversible in the right direction.** If the results list turns out to be slow, adding
+denormalised columns later is an ALTER TABLE plus a change to the refresh. Going the other way,
+after reading a column that may have drifted, means none of the stored values can be trusted.
+
+## 2026-09-20 — Baselines are computed in Python, not in SQL
+
+**Decision.** The baseline computation runs in Python as part of the monthly refresh, reading
+videos per channel, computing medians in code, and writing the four baseline columns back.
+
+**Why.** The computation is a median per channel, per format, per metric, over a window, capped at
+20. In SQL that is one dense statement; in Python it is a readable loop that can be stepped
+through, printed, and checked by hand for a single channel. CLAUDE.md asks for boring solutions
+over clever ones, and this is the part of the project where the owner most needs to verify the
+answer personally. The cost is moving 98,300 videos over the network twice, once a month.
+
+**Also.** Step 8's era baselines use a different window per video with a widening fallback, which
+is awkward in a single SQL statement and straightforward in a loop.
+
+**Reversible.** The output is four columns, so moving the computation into SQL later changes
+nothing downstream.
+
+## 2026-09-20 — A video without a baseline gets NULL, with baseline_kind = 'insufficient'
+
+**Decision.** When a channel has fewer than 10 mature videos of the right format in the window for
+a given metric, that metric's baseline column is NULL and `baseline_kind` is set to
+`'insufficient'`. The check constraint on `baseline_kind` is extended to allow that third value.
+
+**Why.** NULL alone cannot distinguish "not enough history" from "never computed". With 342
+channels of very uneven output, the share of videos that cannot be scored needs to be queryable
+before deciding how the card presents it, and the UI can then explain the absence rather than
+showing a bare dash. `baseline_kind` already exists, so this costs one ALTER TABLE.

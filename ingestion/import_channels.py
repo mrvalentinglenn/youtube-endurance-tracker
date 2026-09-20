@@ -10,6 +10,14 @@ Usage:
     python import_channels.py --test     # processes 5 channels, writes nothing
 """
 
+import sys
+
+# Channel titles can contain any Unicode character. On Windows, stdout otherwise
+# defaults to the system codepage (e.g. cp1252) and crashes on anything outside it,
+# so this must run before any print() call.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import argparse
 import re
 from pathlib import Path

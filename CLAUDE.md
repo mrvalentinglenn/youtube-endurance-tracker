@@ -87,14 +87,20 @@ scheduled run that it actually fired, and keep it in mind after quiet periods.
 - `videos` also has a generated `fts` column (tsvector over title + description). Postgres
   maintains it; ingestion scripts never write to it.
 - `videos` also stores `baseline_views`, `baseline_likes`, `baseline_comments` and `baseline_kind`
-  ("era" or "current"), computed during the 30-day run. One `baseline_kind` covers all three, because
-  the window logic is identical for each metric. Storing them keeps the score stable between runs and
-  makes it explainable in the UI.
+  ("era", "current" or "insufficient"), computed during the 30-day run. One `baseline_kind` covers
+  all three, because the window logic is identical for each metric. Storing them keeps the score
+  stable between runs and makes it explainable in the UI. When a channel has too few mature videos
+  in the window, the baseline columns are NULL and `baseline_kind` is "insufficient", so that "not
+  enough history" is distinguishable from "never computed".
 - `video_stats` — id (identity, PK), video_id (FK), captured_at (date, not timestamp), age_days,
   views, likes, comments (one row per measurement moment, never overwritten). Unique constraint on
   (video_id, captured_at), so a re-run on the same day updates instead of duplicating.
   `captured_at` is a date precisely for that reason: with a timestamp, two runs on one day are two
   different values, the constraint never fires, and the history silently doubles.
+- A video's current value for a metric is always the most recent `video_stats` row for that video,
+  read on demand. `videos` deliberately holds no denormalised `latest_views` columns: a derived
+  copy can silently disagree with the source, and a score computed from a stale number is
+  indistinguishable from a real one. Index: `video_stats (video_id, captured_at desc)`.  
 
 Keep the raw measurements in `video_stats` and never overwrite an older measurement: the history is
 what makes growth visible later. Baselines are computed during the 30-day run and stored on the
@@ -175,6 +181,12 @@ The score compares a video's performance on the selected metric to the normal le
 channel. Baselines are computed and stored for all three metrics — views, likes and comments — and
 the user's metric choice decides which stored column is read. That is a display choice, not a
 recalculation.
+
+**Where the computation runs.** Baselines are computed in Python during the 30-day run, not in SQL.
+A readable loop that can be stepped through and checked by hand for a single channel is worth more
+here than one dense statement, and the era windows in particular are awkward to express in SQL. The
+view does only the division: current value over stored baseline.
+
 
 **Two baselines, depending on the age of the video.**
 

@@ -6,13 +6,6 @@ Working document. Tick off what is done and add new questions as they come up.
 
 - [ ] **Does "last year" work as the default date filter?** Chosen provisionally. Check once real
       data is in the database whether it gives a good first impression.
-- [ ] **How the backfill throttles the Shorts HEAD checks.** The Cycling Content Tracker ran ~120
-      per daily run across 40 channels. Here it is 342 channels across 36 months, and on Shorts-heavy
-      brand channels most videos fall under 180 seconds — plausibly tens of thousands of requests in
-      one run. These cost no YouTube API quota, but that project logged two connection resets and a
-      429 from Google's CDN. Decide on a delay between requests and a retry rule before the backfill
-      runs.
-    
 
 ## Data issues in data/channels_complete.xlsx
 
@@ -28,14 +21,20 @@ Working document. Tick off what is done and add new questions as they come up.
 3. [x] **Channel import script.** Read the spreadsheet from row 2, skip rows without an ID, write the
        channels into the `channels` table. Re-runnable, upsert on channel_id. Also fetch each
        channel's uploads playlist ID and subscriber count via `channels.list`.
-4. [ ] **Verify the Shorts HEAD check.** Assemble a set of videos of known status — real Shorts and
+4. [x] **Verify the Shorts HEAD check.** Assemble a set of videos of known status — real Shorts and
        regular videos under 180 seconds, taken from brand channels — and confirm the check returns
        200 and 303 correctly, with no custom User-Agent. Do this before any classification runs over
        the table.       
-5. [ ] **Backfill script.** For each channel, walk the uploads playlist back to the agreed window,
-       fetch details in batches of 50, and store videos plus a first measurement in `video_stats`.
-       Classify Shorts with the HEAD check on everything under 180 seconds. Log quota usage and HEAD
-       request counts. Test mode on 5 channels first.
+5. [x] **Backfill, phase one.** For each channel, walk the uploads playlist back to the agreed
+       window, fetch details in batches of 50, and store videos plus a first measurement in
+       `video_stats`. YouTube API work only, no HEAD checks (see DECISIONS.md, 2026-09-19, "The
+       backfill runs in two phases"). Done: 342/342 channels, 98,300 videos written, 0 failures.
+       62,215 videos left with `is_short` NULL for phase two.
+5b. [x] **Backfill, phase two.** Walk the videos with `is_short` NULL and classify them with the
+       Shorts HEAD check verified in step 4. Same script as the daily reclassify job (step 12b), so
+       it is written once (`ingestion/classify_shorts.py`). Throttling settled at concurrency 20, no
+       delay (see DECISIONS.md, 2026-09-20). Done: 62,215/62,215 classified, 48,925 Shorts / 49,375
+       long-form total in the database, 0 left NULL, 0 request failures, 0 429s, no drift-guard trip.
 6. [ ] **Refresh script.** Adds new videos and re-measures videos younger than 180 days. Also
        re-fetches all channels via `channels.list` and updates `name` and `subscriber_count`
        (~7 quota units). This is the script the 30-day run calls.
