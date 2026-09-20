@@ -297,8 +297,15 @@ and a video that consistently fails would never enter the archive at all. NULL r
 unknown" honestly, and gives a retry job something to find: the work queue is simply
 `is_short IS NULL`, which needs no extra columns.
 
-**Consequence for the UI.** These videos match neither side of the Shorts vs long-form filter.
-They are visible only when that filter is off.
+**SUPERSEDED — Consequence for the UI.** Superseded on 2026-09-20 by "Shorts vs long-form is a
+required choice, not an optional filter". Kept for the reasoning; do not implement.
+
+> These videos match neither side of the Shorts vs long-form filter. They are visible only when
+> that filter is off.
+
+**Consequence for the UI (2026-09-20).** The format filter is a required choice, so these videos
+are not reachable in the app at all until the reclassify job resolves them. The database currently
+holds none, and the daily job exists to keep it that way.
 
 ## 2026-09-19 — Retrying a failed Shorts check: in-run, plus a daily job
 
@@ -539,6 +546,11 @@ never that it does.
 **Threshold.** 100x, where the tail genuinely begins: 165 videos above it against 533 in the 20-100
 band.
 
+**Amended 2026-09-20** by "Paid-promotion threshold raised from 100 to 500", "The paid-promotion
+note is visible, not hover-only", and "The paid-promotion trigger reads all three score columns".
+The reasoning below stands; the threshold, the placement and the single-metric trigger do not.
+Implement the amendments.
+
 ## 2026-09-20 — Scores of 1,000 and above are displayed as 2.4K
 
 **Decision.** Outlier Scores below 1,000 show one decimal (1.2, 27.4). From 1,000 up they are
@@ -666,3 +678,124 @@ thread-local storage, never sharing one client across threads.
 **Why.** Sharing a single client between the main thread's reads and worker threads' writes crashed
 the first concurrent era-baseline run with a Windows socket error (httpx.ReadError / WinError
 10035). The underlying HTTP connection is not safe to use from several threads at once.
+
+## 2026-09-20 — Paid-promotion threshold raised from 100 to 500
+
+**Decision.** The paid-promotion tooltip appears on `Brand` videos with an Outlier Score of 500 or
+higher, not 100. Everything else about the note is unchanged: wording, tooltip-only placement, and
+Brand-only scope.
+
+**Why.** The original 100 came from the shape of the distribution, not from looking at the videos
+either side of the line. Inspecting the actual titles per band: of the six highest-scoring videos in
+the 100–500 band, one reads like advertising. In the 500–1000 band, four of six do. Since those six
+sit at the very top of their band, the rest of 100–500 is less ad-like still, so the band as a whole
+does not earn the note.
+
+**What this trades.** More real ads go unlabelled. Accepted: the note is a hedge on a tooltip, and
+labelling genuine content as possibly-paid is the worse error of the two — DECISIONS.md already
+names VAUDE's 22-minute documentary as a case the note would be wrong about.
+
+## 2026-09-20 — Paid-promotion threshold raised from 100 to 500
+
+**Decision.** The paid-promotion note appears on `Brand` videos with an Outlier Score of 500 or
+higher, not 100. The wording and the Brand-only scope are unchanged.
+
+**Why.** The original 100 came from the shape of the distribution, not from looking at the videos
+on either side of the line. Inspecting titles per band: of the six highest-scoring videos in the
+100-500 band, one reads like advertising. In the 500-1000 band, four of six do. Those six sit at
+the very top of their band, so the rest of 100-500 is less ad-like still — the band does not earn
+the note.
+
+**What this trades.** More real ads go unlabelled. Accepted: labelling genuine content as
+possibly-paid is the worse of the two errors, and this entry's parent already names VAUDE's
+22-minute documentary as a case the note would be wrong about.
+
+## 2026-09-20 — The paid-promotion note is visible, not hover-only
+
+**Decision.** The note has three parts. The score badge turns red and carries an exclamation mark.
+The tooltip on the badge holds the fuller wording: "Extreme outlier scores may indicate this video
+was used for paid advertising." A line in the card body, below the counts, reads "Metrics on this
+video may reflect paid advertising rather than organic reach." This replaces the original
+"tooltip only, not body text on the card".
+
+**Why.** A hover-only note is invisible to anyone who does not happen to hover over that exact
+element, and unreachable on touch devices entirely. The caveat then reaches nobody while appearing
+to have been handled — worse than not having it, because the project believes it is covered.
+
+**Why the colour as well as the mark.** Red is what makes the badge readable at a glance in a grid
+of 60 cards; the mark alone would be a small glyph inside a badge the eye is reading as a number.
+
+**Why a body line and not only the badge.** The badge qualifies the score. The body line qualifies
+the counts, which is where a marketer's eye goes when deciding whether a video is worth copying —
+9M views against 47 likes is the tell, and that pattern sits in the body, not in the score.
+
+**Why hedged wording throughout.** The API exposes nothing about promotion. `viewCount` is the same
+number whether the views came from search, recommendation or media spend, and that data lives only
+in the advertiser's Google Ads account. Both texts therefore say "may".
+
+## 2026-09-20 — Shorts vs long-form is a required choice, not an optional filter
+
+**Decision.** The format filter always has a value. The user sees either Shorts or long-form, never
+both in one grid. Default on opening: [PENDING].
+
+**Why.** The two formats have different thumbnail aspect ratios, so a mixed grid is ragged or
+forces one format into the other's shape. Their view scales are not comparable either — the
+baselines are already computed separately per format for exactly that reason — so a mixed ranking
+invites a comparison the scoring deliberately refuses to make.
+
+**Consequence for is_short NULL videos.** They are not reachable in the app at all until their
+format is resolved. Accepted: the database currently holds none, in-run retries handle the
+transient failures that cause almost all of them, and the daily reclassify job (NEXT_STEPS.md 12b)
+is the second net. One unreachable video out of 98,300 does not change what the app is worth.
+
+**Note that the second net does not exist yet.** Step 12b is unbuilt, so a video that goes NULL
+today stays NULL indefinitely. The first thing that can create one is the refresh script (step 6),
+which runs HEAD checks on newly published videos. Until 12b ships, that is the gap.
+
+## 2026-09-20 — Card layout follows the Cycling Content Tracker
+
+**Decision.** The video card adopts the visual conventions of the Cycling Content Tracker rather
+than the plain first-pass layout of step 9: Outlier Score in a badge on the top left of the
+thumbnail, "still growing" as a badge on the top right in the style of that project's "Provisional"
+label, icons for views, comments and likes, and 4 cards per row at full width rather than 5.
+
+**Why.** The conventions are proven in a working app the owner has used, so they need no fresh
+design decisions. Score and status belong on the thumbnail because they qualify the image; in body
+text they read as one more statistic beside the counts. Four per row rather than five because this
+app's cards carry more information than that project's.
+
+## 2026-09-20 — The paid-promotion trigger reads all three score columns
+
+**Decision.** A `Brand` video is flagged when any of `score_views`, `score_likes` or
+`score_comments` is 500 or higher. The rule reads all three columns and the outcome is fixed per
+video: it does not follow the metric toggle, so a flagged video carries the note under Views, Likes
+and Comments alike.
+
+**Why not views alone.** Views alone was the obvious reading, and it was calibrated on views — but
+inspecting the data showed advertising takes two distinct shapes here, and views alone catches only
+one of them.
+
+*The bought-reach shape.* TrainingPeaks: 9.05M views against 47 likes. Reach is bought, engagement
+stays flat. Across the 125 Brand videos scoring 500x+ on views, the median likes score is 14.1 and
+the median comments score 6.7 — a ratio of roughly 35:1 between views and likes. Views alone finds
+these.
+
+*The celebrity-campaign shape.* On's Zendaya videos, WHOOP's Ronaldo video, adidas Backyard
+Legends. A celebrity brings a fanbase that genuinely likes and comments, so engagement scales with
+the views instead of lagging. Their views scores sit at 212 to 422 — under the threshold — while
+their likes scores run to 1,782x. **Views alone misses these entirely.** Nine videos, all of them
+campaigns from On, adidas, WHOOP and Salomon.
+
+**What it costs.** A genuinely viral organic Brand video with high engagement and modest reach
+would be flagged wrongly. All nine candidates matching that description were inspected and every
+one turned out to be a campaign, so on this data the cost is near zero. Two more videos are added
+by the comments column.
+
+**Why the outcome does not follow the metric toggle.** A warning that appears and disappears as the
+user switches metric reads as a bug rather than as information about the video. The flag is a
+property of the video, so it is computed once from all three columns and displayed consistently.
+
+**Rejected: a separate threshold per metric.** Likes and comments scores run on a different scale
+from views, so 500 does not mean the same thing across them. Calibrating three thresholds needs
+three rounds of the band inspection that produced the first one, and the single threshold already
+catches both shapes. Revisit only if the note turns out to fire on videos that are plainly organic.

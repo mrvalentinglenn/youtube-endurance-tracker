@@ -82,8 +82,9 @@ scheduled run that it actually fired, and keep it in mind after quiet periods.
   is_triathlon, uploads_playlist_id, subscriber_count, last_checked_at
 - `videos` — video_id (PK), channel_id (FK), title, description, published_at, duration_seconds,
   is_short, thumbnail_url. `duration_seconds` and `is_short` are both nullable. `is_short` NULL
-  means the Shorts check has not succeeded yet, which is distinct from false: such videos are
-  excluded from both format baselines and match neither side of the Shorts vs long-form filter.
+    means the Shorts check has not succeeded yet, which is distinct from false: such videos are
+  excluded from both format baselines, and because the Shorts vs long-form filter is a required
+  choice, they are not visible in the app at all until the reclassify job resolves them.
 - `videos` also has a generated `fts` column (tsvector over title + description). Postgres
   maintains it; ingestion scripts never write to it.
 - `videos` also stores `baseline_views`, `baseline_likes`, `baseline_comments` and `baseline_kind`
@@ -276,7 +277,9 @@ Filters the user can combine:
 6. Publication date: last 6 months, last year, last 2 years, last 3 years, all time, or a custom
    period. "All time" means no date restriction on the query: everything in the database.
    Default on opening the app: last year.
-7. Shorts vs long-form
+7. Format: Shorts or long-form. This is a required choice, not an optional filter — the two
+   formats are never mixed in one grid, because their thumbnails have different aspect ratios and
+   their view scales are not comparable. Default: [PENDING].
 
 Metric and Comparison together decide the sort order:
 
@@ -296,6 +299,34 @@ Each video card shows: thumbnail, title, channel name, **publication date**, vie
 comments. Under Relative it also shows the Outlier Score for the selected metric; under Absolute
 no score is shown, because there is no baseline in play. Videos younger than 180 days carry a
 "still growing" label. Clicking through opens the video on YouTube.
+
+**Score display.** Outlier Scores below 1,000 show one decimal (1.2, 27.4). From 1,000 up they are
+abbreviated: 2,447.8 becomes 2.4K.
+
+**Card layout.** The Outlier Score sits in a badge on the top left of the thumbnail. The "still
+growing" label is a badge on the top right, in the style of the Cycling Content Tracker's
+"Provisional" label. Views, comments and likes are shown with icons rather than words. The grid
+shows 4 cards per row at full width.
+
+**Paid-promotion note.** A video on a channel in the `Brand` category is flagged when **any** of its
+three Outlier Scores — views, likes or comments — is 500 or higher. The rule reads all three
+columns and the result is fixed per video: it does not change when the user switches metric, so a
+flagged video carries the note under Views, Likes and Comments alike. No other category gets this.
+
+A flagged video shows:
+
+- An exclamation mark on the top-left badge. Under Relative the badge holds the score, which turns
+  red and gains the mark. Under Absolute no score is displayed, so the badge holds the exclamation
+  mark alone; on a video that is not flagged, the badge is absent entirely under Absolute.
+- A tooltip on that badge: "Extreme outlier scores may indicate this video was used for paid
+  advertising."
+- A line in the card body, below the view, like and comment counts: "Metrics on this video may
+  reflect paid advertising rather than organic reach." This appears under both Relative and
+  Absolute — Absolute is where an inflated view count does most damage, because it sorts straight
+  to the top of the ranking.
+
+The mark and the body line are always visible; only the fuller wording is on hover. See
+DECISIONS.md, 2026-09-20.
 
 ## Working conventions
 
