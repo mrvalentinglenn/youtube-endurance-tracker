@@ -38,10 +38,16 @@ Working document. Tick off what is done and add new questions as they come up.
 6. [ ] **Refresh script.** Adds new videos and re-measures videos younger than 180 days. Also
        re-fetches all channels via `channels.list` and updates `name` and `subscriber_count`
        (~7 quota units). This is the script the 30-day run calls.
-7. [ ] **Outlier Score.** Compute baselines per channel, split by Shorts and long-form, for all three
-       metrics (views, likes, comments), and expose the scores through a database view. Videos with
-       null likes or comments are excluded from that metric's baseline, and the minimum of 10 is
-       checked per metric independently.
+7. [x] **Outlier Score, current baseline.** Compute the current baseline per channel, split by
+       Shorts and long-form, for all three metrics (views, likes, comments) — `ingestion/
+       compute_baselines.py`. Videos with null likes or comments are excluded from that metric's
+       baseline, and the minimum of 10 is checked per metric independently. Scope: current baseline
+       only (videos 180 days old or younger); era baselines are step 8. Done: 342/342 channels,
+       20,687 videos updated (19,964 `'current'`, 723 `'insufficient'`), 77,613 left `NULL` for step 8.
+7b. [ ] **Outlier Score, database view.** Expose the score (current value ÷ stored baseline) through
+       a database view, per DECISIONS.md's baseline-in-Python decision ("the score itself is derived
+       on read, in a view"). Worth doing after step 8, so the view can be checked against both
+       `'current'` and `'era'` rows at once instead of a partially-populated table.
 8. [ ] **Era baselines.** Extend the score computation with the era baseline for mature videos,
        including the widening fallback and the edge cases at the start and end of a channel's
        history. Verify on a handful of channels that grew strongly: their old videos should no longer

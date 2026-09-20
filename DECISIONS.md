@@ -516,3 +516,83 @@ a given metric, that metric's baseline column is NULL and `baseline_kind` is set
 channels of very uneven output, the share of videos that cannot be scored needs to be queryable
 before deciding how the card presents it, and the UI can then explain the absence rather than
 showing a bare dash. `baseline_kind` already exists, so this costs one ALTER TABLE.
+
+## 2026-09-20 — Extreme scores on Brand channels carry a paid-promotion note
+
+**Decision.** A video on a channel in the `Brand` category with an Outlier Score of 100 or higher
+shows a note that the score may reflect paid promotion. Wording: "Extreme outlier scores may
+indicate this video was used for paid advertising." It appears as a tooltip on the score, not as
+body text on the card. Other categories get no note.
+
+**Why only Brands.** The extreme scorers outside Brand are dominated by FloTrack (57 videos) and
+Tour de France (25), whose top scores are world records and marquee races — real organic hits on
+channels with lopsided output. Labelling those as possibly paid would be wrong. Inside Brand the
+pattern is unmistakable: New Balance's top videos are 15 to 37 seconds, On's are an entire Zendaya
+campaign published in one week, adidas's are World Cup spots.
+
+**Why hedged wording.** The API exposes nothing about promotion — `viewCount` is the same number
+whether the views came from search, recommendation or a million euros of media spend, and that data
+lives only in the advertiser's Google Ads account. The note also has a real counterexample: VAUDE's
+top scorer is a 22-minute documentary, not an ad. So it says the score may indicate advertising,
+never that it does.
+
+**Threshold.** 100x, where the tail genuinely begins: 165 videos above it against 533 in the 20-100
+band.
+
+## 2026-09-20 — Scores of 1,000 and above are displayed as 2.4K
+
+**Decision.** Outlier Scores below 1,000 show one decimal (1.2, 27.4). From 1,000 up they are
+abbreviated: 2,447.8 becomes 2.4K.
+
+**Why.** Most scores are small, so the decimal matters at the low end. A raw "2447.8" on a card
+visually dominates a "1.2" beside it and is harder to read than the shorter form.
+
+
+## 2026-09-20 — Era baseline members must also be older than 180 days
+
+**Decision.** Only videos older than 180 days may be part of an era baseline, the same rule that
+governs the current baseline. A video's era window is truncated at the 180-day line if it extends
+past it.
+
+**Why.** The condition is trivially true for a window sitting deep in the past, but it bites at the
+recent edge: a video published 200 days ago has a window running to 20 days ago, whose second half
+is full of videos still accumulating views. Including them drags the median down and inflates the
+video's score. CLAUDE.md already lists "a baseline is never built from videos younger than 180
+days" as a hard rule; this states the consequence explicitly.
+
+**Expected consequence.** Videos between roughly 180 days and a year old will routinely fail to
+find 10 qualifying videos in the 6-month window and fall through to the widened window or the
+fallback below. That is expected behaviour, not a bug.
+
+## 2026-09-20 — A video with no usable era window falls back to the current baseline
+
+**Decision.** If neither the 6-month nor the 12-month era window holds 10 mature videos of the same
+format, the video is scored against the current baseline (180 days to 24 months) instead, and
+`baseline_kind` records `'current'`. Only if that also fails does it become `'insufficient'`.
+
+**Why.** The alternative was a third widening step to 24 months either side, which stops being an
+"era" in any meaningful sense — comparing a video to things published two years apart reintroduces
+exactly the channel-growth effect the era baseline exists to remove. The fallback is explicit
+rather than silent: `baseline_kind` says which comparison was used, so the share of videos affected
+is queryable and the UI can say so.
+
+**Rejected: nearest-20 instead of a calendar window.** Taking the 20 mature videos closest in
+publication date always produces a baseline where one exists, and adapts to each channel's output
+rate. Declined for the same reason as the 24-month widening: on a low-frequency channel those 20
+can span years, with no cutoff to make that visible.
+
+## 2026-09-20 — One-sided era windows are accepted, not flagged
+
+**Decision.** If a video's era window holds 10 qualifying videos, the median is computed regardless
+of how they are distributed around it. A channel's oldest videos are therefore compared mostly to
+videos published after them. No flag records this.
+
+**Why.** All members are mature and have essentially finished accumulating views, so the comparison
+is not unfair in the way comparing a young video to an old one would be. The residual bias — an
+older video had a smaller channel behind it, so it scores slightly low — pushes affected videos
+down, not up, so they do not pollute the top of a Relative ranking.
+
+**Why no flag.** The backfill stopped at 36 months, so a channel's "oldest video" is the oldest one
+imported, not the oldest that exists. The left side of the window is empty because of the import
+boundary, not because of the channel's history. A flag would record an artefact of the dataset
+rather than a property of the data.
