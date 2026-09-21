@@ -142,7 +142,11 @@ corrects itself within 30 days.
 
 **Retention.** Videos are never deleted for being old. After 180 days a video is frozen, but it stays in the database and remains searchable.
 
-**Descriptions.** Store the full video description. The front-end keyword search runs over title
+**Descriptions.** Store the first 500 characters of the video description, never the full text. Every script that
+writes `description` truncates on write — the backfill, the refresh, and anything added later.
+Descriptions are front-loaded: the median is 535 characters, and the long tail is mostly sponsor
+links, timestamps and social handles that bloat the search index without helping anyone search.
+Existing rows are truncated once in step 7d. See DECISIONS.md, 2026-09-21.. The front-end keyword search runs over title
 plus description, using Postgres full-text search with the `'simple'` configuration: no stemming,
 no stopword removal. The channel set is multilingual, so a language-specific stemmer would apply
 one language's rules to all of them. Any script that rebuilds the `fts` column must use the same
@@ -277,6 +281,10 @@ Content Tracker. Time is controlled entirely through the publication-date filter
 category's top videos under the current filters. `/category/:category` shows one category's full
 ranking, 60 videos. A "Show more" button inside each homepage section navigates to that category's
 page, carrying the current filters.
+Each homepage section is a bordered container with a header bar across the top holding the
+category name, centred, on a subtly raised background; then the cards; then the "Show more" button
+centred at the bottom, inside the container, so it visibly belongs to its section. No bright fill on
+the header — the border and the structure do the separating.
 
 **Section order is fixed:** Brands, Influencers, Professional Athletes, Professional Teams, Race
 Organizers. A product decision, not alphabetical and not by size.
@@ -357,6 +365,11 @@ entirely on the current filters and sort, so there is nothing to store and nothi
 stale. The helper that derives it takes an offset from the start, so pagination does not require
 rewriting it.
 
+The score badge is purple by default and red when the video is flagged by the paid-promotion rule
+below. The colour follows the video-level flag, never the number displayed: a flagged video can
+show a score under 500 on the selected metric and must still be red, or the colour would change as
+the metric toggle changes. Red means one thing on this card and nothing else.
+
 **Thumbnail shape and grid.** Long-form thumbnails are 16:9, Shorts are 9:16. Because the format
 filter is a required choice, each grid holds exactly one aspect ratio. Columns differ by format:
 long-form 1 / 2 / 3 / 4 across mobile / tablet / laptop / wide, Shorts 3 / 4 / 5 / 5. Long-form
@@ -387,9 +400,9 @@ flagged video carries the note under Views, Likes and Comments alike. No other c
 
 A flagged video shows:
 
-- An exclamation mark on the top-left badge. Under Relative the badge holds the score, which turns
-  red and gains the mark. Under Absolute no score is displayed, so the badge holds the exclamation
-  mark alone; on a video that is not flagged, the badge is absent entirely under Absolute.
+- A warning triangle on the top-left badge, drawn as an SVG icon. Under Relative the badge holds
+  the score followed by the triangle. Under Absolute no score is displayed, so the badge holds the
+  triangle alone; on a video that is not flagged, the badge is absent entirely under Absolute.
 - A tooltip on that badge: "Extreme outlier scores may indicate this video was used for paid
   advertising."
 - A line in the card body, below the view, like and comment counts: "Metrics on this video may
@@ -399,6 +412,15 @@ A flagged video shows:
 
 The mark and the body line are always visible; only the fuller wording is on hover. See
 DECISIONS.md, 2026-09-20.
+
+**Theme.** Light and dark, switched by a toggle in the header. Dark on a first visit, regardless of
+the operating system's setting; the user's choice is remembered in `localStorage` and survives a
+reload, falling back to dark if storage is unavailable. The theme class is set on `<html>` by a
+small inline script in `index.html` that runs before React renders — set inside a React effect
+instead, the light theme paints first and visibly flips on every load. Tailwind 4's `dark:` variant
+follows the operating system by default, so it is switched to class-based with
+`@custom-variant dark (&:where(.dark, .dark *));` in the CSS entry point. Every element needs a
+dark treatment, not only the background.
 
 ## Working conventions
 

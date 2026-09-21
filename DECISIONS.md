@@ -736,6 +736,9 @@ the counts, which is where a marketer's eye goes when deciding whether a video i
 number whether the views came from search, recommendation or media spend, and that data lives only
 in the advertiser's Google Ads account. Both texts therefore say "may".
 
+**Amended 2026-09-21** by "The paid-promotion mark is a warning triangle; badges are purple unless
+flagged". The exclamation mark became a warning triangle; the rest stands.
+
 ## 2026-09-20 — Shorts vs long-form is a required choice, not an optional filter
 
 **Decision.** The format filter always has a value. The user sees either Shorts or long-form, never
@@ -1033,3 +1036,129 @@ nothing is recomputed. But the flags live in three places: the spreadsheet, the 
 and the materialised `videos_scored`. The edit only touched the first. Until the import script
 re-runs and the view is refreshed, the app still filters on the old tags — which is the first real
 instance of the refresh obligation this file records elsewhere.
+
+## 2026-09-20 — Refreshing videos_scored needs a database function and two raised timeouts
+
+**Decision.** The refresh runs through `public.refresh_scoring_view()`, a `security definer`
+function that executes `refresh materialized view concurrently public.videos_scored`. Execute is
+revoked from `public` and `anon` and granted to `service_role` alone. `service_role` carries
+`statement_timeout = '15min'`; `anon` stays at 3 seconds.
+
+**Why a function at all.** Supabase's REST API does not accept raw SQL, and a refresh is DDL. There
+is no way to trigger one from the Python client without an RPC to call.
+
+**Why `security definer`.** Refreshing requires owning the view, and `service_role` does not own it.
+The function therefore runs as `postgres`. This is the deliberate version of an object the Cycling
+Content Tracker's DECISIONS.md calls a hole when it is unintentional: one fixed statement, no
+parameters a caller can influence, `search_path` pinned, and execute granted to one role.
+
+**Three timeouts, hit in sequence.** The SQL editor runs as `authenticated` (8s) and cannot run the
+refresh at all. `service_role` defaulted to a few seconds and returned `57014` until raised to 15
+minutes. The Python client then gave up at its own ~60s HTTP read timeout with `httpx.ReadTimeout` —
+but the refresh had already been issued and Postgres completed it regardless, verified by querying
+the view afterwards. So the work succeeded and only the client's report of it failed.
+
+**Consequence for step 6.** The refresh takes over a minute on 98,300 rows. The refresh script must
+raise its own HTTP read timeout, or it will record a failure on a run that actually worked — which
+is worse than a real failure, because it would suppress a successful run's data as if it were
+broken. A monthly job can afford the minute; it cannot afford misreporting it.
+
+## 2026-09-21 — Descriptions truncated to 500 characters; fts stored once
+
+**Decision.** Two changes to stay under the Free Plan's 0.5 GB per-project database limit.
+Descriptions are stored truncated to their first 500 characters, on every write. And `fts` is
+stored once, inside the materialised view, rather than both there and on `videos`. Decided
+2026-09-21; carried out in NEXT_STEPS.md step 7d. Upgrading to Supabase Pro remains the fallback.
+
+**Why.** The database measured 0.65 GB against a 0.5 GB limit, and the archive grows about 18 MB a
+month by design, since videos are never deleted. The largest cost is `fts`, built from title plus
+description and stored twice. Measured on a 10% sample: descriptions ~62 MB, falling to ~36 MB at
+500 characters; `fts` ~115 MB per copy, falling to ~68 MB. With both changes the total is estimated
+at ~320 MB, which is roughly a year or more of growth before the limit rather than weeks.
+
+**Why truncate every description rather than prune the weakest videos.** Dropping descriptions for
+each channel's lowest-performing 30% was considered first, and rejected on three grounds. The app
+sorts six ways, and a video in the bottom 30% by views can rank highly by comments or under
+Relative, so any cut degrades some ranking silently. Keyword search is how a user finds videos that
+do not rank on their own, and a video with no description would be findable by title alone, with
+nothing to say the results were incomplete. And young videos sit in the bottom 30% by definition,
+so the rule would need a maturity condition and a pruning job re-run as percentiles shift.
+Truncation applies to every video equally, needs no ranking judgement, and degrades search
+gracefully: it loses mostly the boilerplate tail, and every video stays findable.
+
+**Why 500.** Close to the median of 535, so about half of descriptions are untouched and the cut
+falls mainly on the long tail — the p90 is 1,649 characters.
+
+**What it costs.** Search no longer matches words that appear only late in a long description.
+Accepted, since that tail is predominantly links and boilerplate.
+
+**Reversible.** Full descriptions can be re-fetched from `videos.list` for roughly 2,000 quota units
+across the archive, well inside one day's 10,000.
+
+**Why storing fts once is safe.** Since step 7c the front end searches the materialised view and
+never the table, so the copy on `videos` serves nothing. Its GIN index was dropped on 2026-09-21
+for the same reason. Moving it means the live view computes `fts` itself, with the same `'simple'`
+configuration.
+
+**Execution note.** An update writes new row versions without removing the old ones, so truncating
+98,300 descriptions makes `videos` briefly larger before it gets smaller. Only `VACUUM FULL`
+returns the space, and it cannot run inside a function, so the RPC route used for the materialised
+view does not work here. Step 7d needs a direct database connection.
+
+## 2026-09-21 — The paid-promotion mark is a warning triangle; badges are purple unless flagged
+
+**Decision.** The mark on a flagged video's score badge is a warning triangle — the standard
+hazard-sign shape, an exclamation mark inside a triangle outline — drawn as an SVG icon. Score
+badges are purple by default and red when the video is flagged. The tooltip and the body line are
+unchanged.
+
+**Why a triangle.** A bare `!` on a badge carries no stated referent; the hazard triangle is
+universally read as "caution" and says what kind of mark it is without a caption.
+
+**Why SVG and not an image.** The reference image offered was a stock bitmap carrying a stock
+site's watermark, so not ours to use, and a bitmap renders soft at badge size. An SVG scales cleanly
+and can be recoloured for dark mode.
+
+**Why purple as the default.** It matches the Cycling Content Tracker, and more importantly it frees
+red to mean exactly one thing. With every badge red, the flag would have been one small glyph inside
+a red badge; with badges purple, a red one stands out across a grid of cards at a glance.
+
+**Why the colour follows the flag and not the displayed number.** The flag is a property of the
+video, set when any of its three scores reaches 500. The badge shows only the selected metric's
+score, so a flagged video can display a number below 500 — La Sportiva's "Exodia" shows `325.2×`
+under Likes because it is flagged on comments. Colouring by the displayed number would turn a badge
+red and back as the metric toggle changes, which is the flicker the 2026-09-20 three-column trigger
+decision was written to prevent.
+
+## 2026-09-21 — Dark mode, with a toggle, dark by default
+
+**Decision.** A toggle in the header switches light and dark. Dark on a first visit, remembered in
+`localStorage` thereafter.
+
+**Why dark by default rather than following the operating system.** Thumbnails read better against
+a dark ground, and the Cycling Content Tracker — the reference for this app's look — is dark. A
+visitor opening the link for the first time sees the intended design rather than whichever one their
+system setting happens to choose.
+
+**Why a toggle at all.** Some readers prefer light, and a portfolio piece should not force a
+preference on someone evaluating it.
+
+**Two implementation details that fail silently.** The theme class is set by an inline script in
+`index.html` before React renders; set in a React effect, the page paints light and flips to dark on
+every load. And Tailwind 4's `dark:` variant follows the operating system by default, so it has to
+be switched to class-based with a custom variant — without that, the toggle appears to work in
+whichever mode matches the system and does nothing in the other.
+
+## 2026-09-21 — Homepage sections are framed
+
+**Decision.** Each category section on the homepage is a bordered container: a header bar with the
+category name centred on a subtly raised background, the cards, and the "Show more" button centred
+at the bottom inside the container.
+
+**Why.** Without the frames the five sections ran together, and "Show more" floated between two
+sections with no visible owner. Taken from the Cycling Content Tracker, which reached the same
+layout for the same reason.
+
+**Why no bright header fill.** That project tried one and dropped it: a loud colour on every section
+header made the page shout, and red is now reserved for the paid-promotion flag. The border and the
+structure do the separating.

@@ -5,6 +5,20 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>frontend</title>
+    <script>
+      // Sets the dark class on <html> before React renders, so the page never paints
+      // light and then flips. Plain inline script, not a module: modules are deferred
+      // and would run too late. Dark is the default on a first visit or when storage
+      // is unavailable.
+      (function () {
+        var theme = 'dark';
+        try {
+          var stored = localStorage.getItem('ete-theme');
+          if (stored === 'light' || stored === 'dark') theme = stored;
+        } catch (e) {}
+        if (theme === 'dark') document.documentElement.classList.add('dark');
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

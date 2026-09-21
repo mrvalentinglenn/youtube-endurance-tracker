@@ -1,3 +1,5 @@
+import { useState } from 'react'
+
 const SCORE_COLUMNS = { views: 'score_views', likes: 'score_likes', comments: 'score_comments' }
 
 const PROMOTION_CATEGORY = 'Brand'
@@ -75,13 +77,26 @@ function HeartIcon() {
   )
 }
 
+// Standard hazard-sign shape: triangle outline, exclamation mark inside. White on a
+// solid red or purple badge, so its contrast never depends on the page theme.
+function WarningTriangleIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" className="w-3.5 h-3.5">
+      <path d="M12 3.5 2.3 20.5h19.4L12 3.5z" strokeLinecap="round" />
+      <line x1="12" y1="10" x2="12" y2="14.5" strokeLinecap="round" />
+      <circle cx="12" cy="17.3" r="0.9" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
 export default function VideoCard({ video, metric, comparison, rank, isShort }) {
   const flagged = isPromotionFlagged(video)
   const score = video[SCORE_COLUMNS[metric]]
   const durationText = formatDuration(video.duration_seconds)
+  const [avatarFailed, setAvatarFailed] = useState(false)
 
   // Under Relative the badge always holds the score. Under Absolute it is absent unless
-  // the video is flagged, in which case it holds the exclamation mark alone.
+  // the video is flagged, in which case it holds the warning triangle alone.
   const showScoreBadge = comparison === 'relative' || flagged
 
   return (
@@ -91,9 +106,9 @@ export default function VideoCard({ video, metric, comparison, rank, isShort }) 
       rel="noreferrer"
       className="block w-full"
     >
-      <div className="text-xs font-semibold text-gray-500 mb-1">#{rank}</div>
+      <div className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1">#{rank}</div>
 
-      <div className={`relative w-full ${isShort ? 'aspect-[9/16]' : 'aspect-video'} rounded-lg overflow-hidden bg-gray-100`}>
+      <div className={`relative w-full ${isShort ? 'aspect-[9/16]' : 'aspect-video'} rounded-lg overflow-hidden bg-gray-100 dark:bg-gray-800`}>
         <img
           src={video.thumbnail_url}
           alt={video.title}
@@ -102,13 +117,13 @@ export default function VideoCard({ video, metric, comparison, rank, isShort }) 
 
         {showScoreBadge && (
           <div
-            className={`absolute top-2 left-2 rounded px-1.5 py-0.5 text-xs font-semibold text-white ${
-              flagged ? 'bg-red-600' : 'bg-black/80'
+            className={`absolute top-2 left-2 flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-semibold text-white ${
+              flagged ? 'bg-red-600' : 'bg-purple-600'
             }`}
             title={flagged ? PROMOTION_TOOLTIP : undefined}
           >
-            {comparison === 'relative' ? formatScore(score) : ''}
-            {flagged && <span>!</span>}
+            {comparison === 'relative' && <span>{formatScore(score)}</span>}
+            {flagged && <WarningTriangleIcon />}
           </div>
         )}
 
@@ -126,11 +141,22 @@ export default function VideoCard({ video, metric, comparison, rank, isShort }) 
       </div>
 
       <div className="p-2 space-y-1">
-        <h3 className="text-sm font-medium leading-snug line-clamp-2">{video.title}</h3>
-        <p className="text-sm text-gray-600">{video.channel_name}</p>
-        <p className="text-xs text-gray-500">{formatDate(video.published_at)}</p>
+        <h3 className="text-sm font-medium leading-snug line-clamp-2 text-gray-900 dark:text-gray-100">{video.title}</h3>
+        <p className="text-sm text-gray-600 dark:text-gray-400 flex items-center gap-1.5">
+          {video.avatar_url && !avatarFailed && (
+            <img
+              src={video.avatar_url}
+              alt=""
+              loading="lazy"
+              onError={() => setAvatarFailed(true)}
+              className="w-5 h-5 rounded-full object-cover shrink-0"
+            />
+          )}
+          {video.channel_name}
+        </p>
+        <p className="text-xs text-gray-500 dark:text-gray-400">{formatDate(video.published_at)}</p>
 
-        <div className="flex gap-3 text-xs text-gray-700 pt-1">
+        <div className="flex gap-3 text-xs text-gray-700 dark:text-gray-300 pt-1">
           <span className="flex items-center gap-1">
             <EyeIcon /> {formatCount(video.views)}
           </span>
@@ -142,7 +168,7 @@ export default function VideoCard({ video, metric, comparison, rank, isShort }) 
           </span>
         </div>
 
-        {flagged && <p className="text-xs text-red-600 pt-1">{PROMOTION_BODY_LINE}</p>}
+        {flagged && <p className="text-xs text-red-600 dark:text-red-400 pt-1">{PROMOTION_BODY_LINE}</p>}
       </div>
     </a>
   )

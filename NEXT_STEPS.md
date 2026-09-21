@@ -6,19 +6,29 @@ Working document. Tick off what is done and add new questions as they come up.
 
 - [ ] **Does "last year" work as the default date filter?** Chosen provisionally. Check once real
       data is in the database whether it gives a good first impression.
-- [ ] **`videos_scored` is too slow on a cold cache.** Measured 2026-09-20 with `explain analyze`
-      on the app's default query (Views, Absolute, last year, 60 rows): 7,255ms on a cold run,
-      370ms warm, then 3,780ms again on a later run that would not warm up. `anon` has a 3-second
-      statement timeout, so a visitor arriving when the cache is cold gets a failure — which is
-      precisely the case of someone opening the link for the first time. The cost is reading rows
-      from `videos`: about 6,500 heap blocks for 18,136 rows, 2.5s of the total. The `DISTINCT ON`
-      over all 98,300 `video_stats` rows adds a further 1s, and the merge sort spills to disk.
-      Dropping `fts` from the view was tested and made no measurable difference; it has been
-      restored. Real options are a materialised view with its own indexes (what the Cycling Content
-      Tracker did, for the same reason), or denormalising the latest stats onto `videos` to remove
-      the join. Both are decisions with trade-offs — see DECISIONS.md, 2026-09-20, which argues
-      against a denormalised copy. Do this before step 10 adds more query shapes.
-
+- [ ] **`"Incluencer Cycling"` is a typo in `data/channels_complete.xlsx`, column F.** Found while
+      building step 10's subcategory filter (2026-09-20): every other Influencer subcategory reads
+      "Influencer ___" (Running, Swimming, Triathlon); Cycling alone reads "Incluencer Cycling". The
+      front end now hardcodes this exact string in `frontend/src/lib/filters.js` because it must
+      match the database, which makes the misspelling visible in the subcategory filter's checkbox
+      label. Fixing it means the same kind of one-off spreadsheet edit as the triathlon-tagging fix
+      earlier (channels.subcategory in the DB, then the front end's hardcoded string, then a
+      re-import) — flagging rather than doing it, since the spreadsheet is read-only input.
+- [ ] **Database is over the Free Plan size limit.** Measured 2026-09-21: 0.65 GB against a 0.5 GB
+      per-project limit. Breakdown at the time: `videos` 329 MB, `videos_scored` 244 MB including
+      its indexes, `video_stats` 21 MB, `channels` 200 kB. The 56 MB GIN index on `videos.fts` was
+      unused since step 7c and has been dropped, bringing the total to roughly 0.59 GB. The main
+      remaining cause is `fts` stored twice — on `videos` and inside the materialised view — plus
+      long descriptions feeding it. The archive grows ~18 MB a month by design, since videos are
+      never deleted.
+      **Plan: shrink the database first (step 7d), which should reach ~320 MB and buy a year or
+      more on the free tier. Upgrading to Supabase Pro ($25/month) remains the fallback if the
+      measurements after 7d come in higher, or if growth outpaces them.** No grace-period notice
+      received yet in email or the dashboard as of 2026-09-21 — check both regularly until 7d is
+      done. When restrictions apply, every request returns 402, so the front end goes down as well
+      as ingestion, and community reports suggest it can affect every project in the organisation,
+      including the live Cycling Content Tracker. Cleaning up afterwards has not reliably lifted
+      restrictions without a support ticket.
 
 ## Data issues in data/channels_complete.xlsx
 
@@ -51,7 +61,9 @@ Working document. Tick off what is done and add new questions as they come up.
 6. [ ] **Refresh script.** Adds new videos and re-measures videos younger than 180 days. Also
        re-fetches all channels via `channels.list` and updates `name` and `subscriber_count`
        (~7 quota units). This is the script the 30-day run calls. Refreshes `videos_scored` as its final step, after its own checks pass; a failed refresh
-        fails the run. See DECISIONS.md, 2026-09-20.
+        fails the run.         Must raise its own HTTP read timeout above 60 seconds before calling
+        `refresh_scoring_view()` — the refresh takes over a minute, and the default client timeout
+        reports a failure on a run that succeeded. See DECISIONS.md, 2026-09-20.
 7. [x] **Outlier Score, current baseline.** Compute the current baseline per channel, split by
        Shorts and long-form, for all three metrics (views, likes, comments) — `ingestion/
        compute_baselines.py`. Videos with null likes or comments are excluded from that metric's
@@ -74,7 +86,20 @@ Working document. Tick off what is done and add new questions as they come up.
         against 7,255ms cold and 370ms warm — an index scan on `videos_scored_views_idx` that reads
         218 entries and stops, with no join, no `DISTINCT ON` and no sort. Cold versus warm is no
         longer a distinction: the query reads index pages, not 52MB of heap. 98,300 rows in both
-        objects. Verified in the browser after an idle period.        
+        objects. Verified in the browser after an idle period.  
+7d. [ ] **Shrink the database to stay on the free tier.** Measured 2026-09-21 on a 10% sample:
+        truncating descriptions to 500 characters takes them from ~62 MB to ~36 MB, and `fts` —
+        built from the description and stored twice — from ~115 MB to ~68 MB per copy. Two parts:
+        (1) truncate every description to 500 characters, (2) remove the duplicate `fts` from
+        `videos`, keeping only the copy in the materialised view. Estimated total ~320 MB, against
+        ~540 MB today and a 500 MB limit. Median description is 535 characters, p90 1,649 — the
+        tail is mostly sponsor links, timestamps and social handles.
+        **Do this before step 6**, which must truncate descriptions on write or the archive fills
+        back up. Needs a direct database connection: an update writes new row versions, so the
+        table grows before it shrinks, and only `VACUUM FULL` reclaims the space — which cannot
+        run inside a function, so the RPC route used elsewhere does not work. Changes CLAUDE.md's
+        "Store the full video description" rule; record the decision in DECISIONS.md first.
+        Reversible: descriptions can be re-fetched from the API for ~2,000 quota units.              
 8. [x] **Era baselines.** Extended `ingestion/compute_baselines.py` with the era baseline for mature
        videos: 6-month window centred on the video's own date, widening to 12 months, falling back to
        the current baseline, then `'insufficient'`. Done: 342/342 channels, 0 write failures, every one
@@ -117,20 +142,43 @@ Working document. Tick off what is done and add new questions as they come up.
         not a SQL object, so it lives outside the repo and a rebuild needs it created by hand, or
         the site comes up with no avatars and no error. Cards must render without an avatar
         regardless, since a newly added channel has none until the next refresh.        
-9d. [ ] **Apply the influencer sport correction to the database.** The spreadsheet edit is done
+9d. [x] **Apply the influencer sport correction to the database.** The spreadsheet edit is done
         (DECISIONS.md, 2026-09-20). Re-run `ingestion/import_channels.py` so the five channels'
         `is_cycling` flag updates in the `channels` table, then
         `refresh materialized view concurrently public.videos_scored;` so the app sees it. Verify
         with a query that the five channels have `is_cycling = false` and `is_triathlon = true` in
         both the table and the view.              
-10. [ ] **Front-end: routes and filters.** Two routes: `/` with one section per category in fixed
-        order (Brands, Influencers, Professional Athletes, Professional Teams, Race Organizers),
-        each showing that category's top videos and a "Show more" button; and `/category/:category`
-        with that category's full ranking, 60 videos. Filters: metric, comparison, keyword search on
-        title + description, category (controls which sections appear), subcategory (filters within
-        sections, grouped by category), sport (global, matches on at least one), publication date,
-        and format. The filter bar is active on both routes and carries through "Show more". See
-        DECISIONS.md, 2026-09-20.
+10. [x] **Front-end: routes and filters.** `react-router-dom` v7 added. `frontend/src/lib/filters.js`
+        (the single-sourced category mapping, subcategory taxonomy, sport/date definitions,
+        `DEFAULT_FILTERS`, `resolveFilters`), `frontend/src/lib/videos.js` (one shared `fetchVideos`
+        for both routes), `frontend/src/components/{VideoGrid,CategorySection,CategoryPills,
+        FilterBar,HomeCategoryToggles}.jsx`, `frontend/src/pages/{HomePage,CategoryPage}.jsx`.
+        `VideoCard.jsx` untouched, as expected.
+
+        Subcategory collision check: none — 22 distinct subcategory names across the 5 categories,
+        all unique, so `nosub` stores bare subcategory strings rather than a qualified
+        `category > subcategory` key. One data quirk found along the way, not fixed: the Influencer
+        > Cycling subcategory is spelled `"Incluencer Cycling"` in the source data; used as-is since
+        the front end must match the database exactly.
+
+        Two gaps in the original spec, resolved and flagged rather than guessed at: the homepage's
+        category selection had no listed param, added as `nocat` (deselected slugs, mirroring
+        `nosub`'s pattern exactly); "a custom period" had no param names, added as `from`/`to`
+        (ISO UTC dates, two native date inputs shown only when `date=custom`).
+
+        Verified in a real browser (not Python — the secret key has no grant on `videos_scored` at
+        all): all 5 homepage sections render and fetch independently; "Show more" carries filters
+        correctly; category pills add/remove and the last one is genuinely non-interactive; a
+        13-param URL (category pair + 7 filters including a sport pair and a subcategory exclusion)
+        fully reconstructs from one fresh navigation; the sport filter's "at least one" semantics
+        confirmed three ways (swimming-only on a cycling+triathlon channel → 0 results; that
+        channel's own sports selected → 60; cycling deselected, triathlon kept → still 60); a
+        subcategory exclusion removed exactly the expected channels (AG1, Maurten, NAMEDSPORT) and
+        nothing else; the search box's debounce collapsed an entire typed phrase into one history
+        entry (replace) while Clear added a new one (push), confirmed by walking `window.history`
+        directly, not just watching the URL bar; Shorts format renders a real 9:16 grid. Zero
+        console errors and zero `57014`s across the whole session — the materialised view (step 7c)
+        holding under real query variety, not just the one shape it was measured against.
 
 11. [ ] **Deploy to Vercel** and add the environment variables there.
 12. [ ] **GitHub Actions workflow.** Schedule the refresh script monthly, with the keys in GitHub
