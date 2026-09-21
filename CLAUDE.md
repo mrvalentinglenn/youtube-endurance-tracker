@@ -53,7 +53,7 @@ re-run to add or update channels, and it must never delete videos.
 Same stack as the Cycling Content Tracker, so the owner stays on familiar ground:
 
 - Vite + React 19 + React Router 7, styled with Tailwind CSS 4
-- Supabase (Postgres) as the database, in a new project of its own
+- Supabase (Postgres) as the database, in a new project of its own, on the Pro plan
 - Vercel for hosting, deployed as a static site with `frontend/` as the project root, and a
   `vercel.json` that rewrites all routes to `index.html` for SPA routing
 - Python for the ingestion scripts (backfill and refresh)
@@ -66,8 +66,11 @@ only in the ingestion environment and never appears anywhere under `frontend/`.
 
 Environment variables: `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` for the front end,
 read via `import.meta.env`, with an explicit error if either is missing. The ingestion scripts use
-the Supabase secret key and `YOUTUBE_API_KEY`, stored in GitHub Secrets for the scheduled run and in
-a local `.env` for manual runs.
+the Supabase secret key, `YOUTUBE_API_KEY`, and `SUPABASE_DB_URL` — a direct Postgres connection
+string through Supabase's Session pooler, used with `psycopg` for anything the REST API cannot do or
+cannot finish in time. All three are stored in GitHub Secrets for the scheduled run and in the root
+`.env` for manual runs. The connection string contains the database password: a `@` or other
+reserved character in it must be percent-encoded (`@` becomes `%40`).
 
 `.gitignore` must exclude `.env*`, `node_modules`, `__pycache__`, and any spreadsheet working copies
 other than the one in `data/`.
@@ -76,13 +79,24 @@ other than the one in `data/`.
 With a monthly job this is a real risk, and the job simply goes quiet. Check once after the first
 scheduled run that it actually fired, and keep it in mind after quiet periods.
 
+**Disk.** Pro disks auto-scale when usage reaches 90%, but a single large operation can outrun the
+resize. A concurrent refresh of `videos_scored` builds a complete second copy of the view plus
+temporary files for comparing the two, and on a nearly full disk it fails with `DiskFull`. The same
+holds for `VACUUM FULL` and anything else that rewrites a large object. Check free disk before such
+operations, and expand the disk manually beforehand if it is tight — resizes are rationed, so do it
+in one decisive step.
+
 ## Data model (minimum)
 
 - `channels` — channel_id (PK), name, category, subcategory, is_swimming, is_cycling, is_running,
+  is_triathlon, uploads_playlist_id, subscriber_count, last_checked_at, avatar_url. `avatar_url` is
+  the public URL of the channel's logo in the Supabase Storage bucket `channel-avatars`, written by
+  `ingestion/sync_avatars.py`. The bucket is not a SQL object: a rebuilt project needs it created by
+  hand, or the site comes up with no avatars and no error.
   is_triathlon, uploads_playlist_id, subscriber_count, last_checked_at
 - `videos` — video_id (PK), channel_id (FK), title, description, published_at, duration_seconds,
   is_short, thumbnail_url. `duration_seconds` and `is_short` are both nullable. `is_short` NULL
-    means the Shorts check has not succeeded yet, which is distinct from false: such videos are
+  means the Shorts check has not succeeded yet, which is distinct from false: such videos are
   excluded from both format baselines, and because the Shorts vs long-form filter is a required
   choice, they are not visible in the app at all until the reclassify job resolves them.
 - `videos` also has a generated `fts` column (tsvector over title + description). Postgres
@@ -103,7 +117,11 @@ scheduled run that it actually fired, and keep it in mind after quiet periods.
   divisions. The logic lives here and nowhere else.
 - `videos_scored` — a materialised view over `videos_scored_live`, carrying the indexes, and the
   only object the front end reads. It keeps the name the front end already uses, so the read
-  contract is unchanged. Refreshed by the ingestion run, never by the front end.  
+  contract is unchanged. Refreshed by the ingestion run, never by the front end. Ten indexes: unique
+  on `video_id` (required by `REFRESH ... CONCURRENTLY`), one per sort column written
+  `desc nulls last` to match the front end's `nullsFirst: false`, plus `published_at`, `is_short`,
+  and a GIN index on `fts`. SELECT is granted to `anon` for the front end and to `service_role` so
+  ingestion scripts can verify what the app sees.
 - A video's current value for a metric is always the most recent `video_stats` row for that video,
   read on demand. `videos` deliberately holds no denormalised `latest_views` columns: a derived
   copy can silently disagree with the source, and a score computed from a stale number is
@@ -120,9 +138,10 @@ writing 0 would record a disabled feature as an absence of engagement.
 Foreign keys have no cascade delete. Videos are never deleted, so a database that refuses to delete
 a channel while videos reference it is the safer default.
 
-Indexes: `videos.channel_id`, `videos.published_at`, `videos.is_short`, and a full-text index over
-title plus description. Without them the filters slow down badly once the archive holds tens of
-thousands of videos.
+Indexes on `videos`: `channel_id`, `published_at` and `is_short`. The full-text GIN index lives on
+`videos_scored`, not on `videos`: the front end searches the materialised view, so an index on the
+table served nothing and was dropped on 2026-09-21. Without these indexes the filters slow down
+badly once the archive holds tens of thousands of videos.
 
 ## Ingestion rules
 
@@ -146,7 +165,8 @@ corrects itself within 30 days.
 writes `description` truncates on write — the backfill, the refresh, and anything added later.
 Descriptions are front-loaded: the median is 535 characters, and the long tail is mostly sponsor
 links, timestamps and social handles that bloat the search index without helping anyone search.
-Existing rows are truncated once in step 7d. See DECISIONS.md, 2026-09-21.. The front-end keyword search runs over title
+Existing rows are truncated in step 7d, which is under review since the Pro upgrade — see
+NEXT_STEPS.md. See DECISIONS.md, 2026-09-21. The front-end keyword search
 plus description, using Postgres full-text search with the `'simple'` configuration: no stemming,
 no stopword removal. The channel set is multilingual, so a language-specific stemmer would apply
 one language's rules to all of them. Any script that rebuilds the `fts` column must use the same
@@ -227,14 +247,19 @@ last, exactly like any other unscored video.
 **Baseline members are always mature.** Only videos older than 180 days at the time of computation
 may be part of any baseline. Videos that are still growing would drag the median down.
 
-**Cap of 20.** Both baselines use at most the 20 most recent videos in their window.
+**Cap of 20, selected differently per baseline.** The current baseline takes the 20 most recent
+videos in its window. The era baseline takes the 20 nearest the video, balanced across both sides,
+as described above — never the 20 most recent. Taking the most recent in an era window always
+samples its late end: FloTrack's top video, published 2024-04-01, had its baseline drawn from a
+single week six months later. See DECISIONS.md, 2026-09-21.
 
 **Why 180 days.** Videos younger than 180 days are still accumulating views and are not a reliable
 reference. Baselines are therefore built only from mature videos.
 
-**Why a cap of 20.** High-frequency channels would otherwise have a baseline dominated by
-18-month-old videos, which measures channel growth instead of video performance. Low-frequency
-channels simply use every video they have in the window.
+**Why a cap of 20.** For the current baseline, a high-frequency channel would otherwise be dominated
+by 18-month-old videos, which measures channel growth instead of video performance. For the era
+baseline, it keeps the comparison to the video's immediate contemporaries. Low-frequency channels
+simply use every video they have in the window.
 
 **Split by format.** Baselines are computed separately for Shorts and long-form, because their view
 scales differ. Each format needs its own minimum of 10 videos.
@@ -257,10 +282,12 @@ or sport. A filter changes which videos are shown, never how they are scored.
 - The era window is anchored to the video's own publication date, never to the current date. A frozen
   video's score must not change between runs unless new videos from its era were added.
 - When the window is widened from 6 to 12 months, the widening applies to both sides.
-- A video at the edge of the dataset has a one-sided window. This is accepted: if 10 qualifying
-  videos exist, the median is computed regardless of how they sit around the video, and nothing
-  flags it. The left edge is an artefact of the 36-month import boundary, not the channel's real
-  history. See DECISIONS.md, 2026-09-20.
+- A video at the edge of the dataset has a one-sided window. This is accepted: the fill rule takes
+  its neighbours from whichever side has them, and nothing flags it. The left edge is an artefact of
+  the 36-month import boundary, not the channel's real history. See DECISIONS.md, 2026-09-20.
+- When selecting era neighbours, ties in distance or identical publication times are broken by
+  `video_id`. An unstable ordering would let a frozen video's baseline change between runs with
+  nothing else having changed.  
 - A video with a null likes or comments count is excluded from that metric's baseline, never counted
   as zero. Postgres arithmetic propagates NULL, so such videos drop out of that ranking rather than
   appearing artificially poor.  
@@ -278,9 +305,12 @@ failure.
 Content Tracker. Time is controlled entirely through the publication-date filter below.
 
 **Two routes.** `/` is the homepage: one section per category, in fixed order, each showing that
-category's top videos under the current filters. `/category/:category` shows one category's full
-ranking, 60 videos. A "Show more" button inside each homepage section navigates to that category's
-page, carrying the current filters.
+category's top videos under the current filters. `/category/:categories` shows a single merged
+ranking of 60 videos across one or more categories, given as a comma-separated list of slugs —
+`brands`, `influencers`, `athletes`, `teams`, `organizers` — e.g. `/category/brands,teams`. Its
+heading names the selection, and a row of category pills with a "Back to home" link toggles
+membership. A "Show more" button inside each homepage section navigates to that category's page,
+carrying the current filters.
 Each homepage section is a bordered container with a header bar across the top holding the
 category name, centred, on a subtly raised background; then the cards; then the "Show more" button
 centred at the bottom, inside the container, so it visibly belongs to its section. No bright fill on
@@ -333,10 +363,14 @@ Metric and Comparison together decide the sort order:
 Absolute answers "what got the most attention in this sector"; relative answers "what punched above
 its weight". Large channels dominate the first, small channels surface in the second.
 
-Each video card shows: thumbnail, title, channel name, **publication date**, views, likes and
+Absolute answers "what got the most attention in this sector"; relative answers "what punched above
+its weight". Large channels dominate the first, small channels surface in the second.
+
+Each video card shows: thumbnail, title, channel's avatar and name, **publication date**, views, likes and
 comments. Under Relative it also shows the Outlier Score for the selected metric; under Absolute
 no score is shown, because there is no baseline in play. Videos younger than 180 days carry a
-"still growing" label. Clicking through opens the video on YouTube.
+"still growing" label. Clicking through opens the video on YouTube. The avatar is a small round image before the channel name, hidden when `avatar_url` is NULL or the
+image fails to load, and given `alt=""` since the name beside it already says the same thing.
 
 **Score display.** The Outlier Score is shown as a multiple with an explicit `×`, to one decimal:
 `1.2×`, `27.4×`. From 1,000 up the number is abbreviated and keeps the multiplier: `2,447.8`
@@ -410,8 +444,8 @@ A flagged video shows:
   Absolute — Absolute is where an inflated view count does most damage, because it sorts straight
   to the top of the ranking.
 
-The mark and the body line are always visible; only the fuller wording is on hover. See
-DECISIONS.md, 2026-09-20.
+The mark and the body line are always visible; only the fuller wording is on hover.
+See DECISIONS.md, 2026-09-20 and 2026-09-21.
 
 **Theme.** Light and dark, switched by a toggle in the header. Dark on a first visit, regardless of
 the operating system's setting; the user's choice is remembered in `localStorage` and survives a
@@ -444,8 +478,18 @@ dark treatment, not only the background.
   passed: a run that failed must not publish its data to the site. A failed refresh fails the run,
   with an error message naming it. A materialised view that silently stops refreshing is the one
   failure mode this project cannot otherwise see.
-  - `videos_scored_live` holds the scoring query; `videos_scored` is a materialised copy of its
+- `videos_scored_live` holds the scoring query; `videos_scored` is a materialised copy of its
   output and is the only object the front end reads. Change scoring in the live view and refresh —
   never edit the materialised view, which is `select * from` the live one precisely so the logic
   cannot exist in two places.
+- Anything long-running goes over the direct database connection (`SUPABASE_DB_URL`), never through
+  the SQL editor or an RPC. Both sit behind Supabase's web gateway, which cuts requests off: the
+  editor returns "upstream timeout" and RPCs return 504. A concurrent refresh of `videos_scored`
+  takes about six minutes, so it can only run directly. Set a session `statement_timeout` for such
+  work.
+- Dropping and recreating `videos_scored` drops its indexes and its grants with it. Recreate all ten
+  indexes and reissue SELECT to `anon` and `service_role`, then verify before moving on.
+- `information_schema` does not describe materialised views: it reports no columns and no grants for
+  them even when both exist. Check them in the catalog instead — `pg_attribute` for columns,
+  `pg_class.relacl` for grants, where `anon=r` means SELECT.
 

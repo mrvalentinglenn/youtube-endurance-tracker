@@ -18,10 +18,24 @@ members must also be older than 180 days", "...falls back to the current baselin
     past side -- a channel's oldest videos get a one-sided window on purpose, and it is
     not flagged). The window is anchored to the video's own publication date, never to
     today, so a frozen video's score does not drift between runs on its own.
+  - Within the window, the sample is the up-to-20 videos NEAREST to the video's own
+    published_at, not the 20 most recent. Up to 10 are taken from each side (before and
+    after); if one side is short, the shortfall is filled from the other side's
+    next-nearest, capped at 20 total. Ties (equal distance, or two candidates sharing a
+    publication time) are broken by video_id, so the sample -- and therefore a frozen
+    video's score -- is stable between runs.
+
+    This replaced a bug: the original implementation reused the current baseline's "most
+    recent 20" rule for the era window too. Since the window is centred on the video but
+    "most recent" always samples its late end, every video was compared only against
+    what its channel published after it -- on a fast-growing channel, that means
+    systematically comparing old videos against a bigger, later version of the channel.
+    Measured on FloTrack: a video published 2024-04-01 had its baseline built entirely
+    from videos published 2024-09-24 to 2024-09-30, six months later and one week wide.
   - If a metric has fewer than 10 qualifying videos in the 6-month window, it widens to
-    12 months (both sides). If still short, that metric falls back to the channel's
-    current baseline (same pool as above, same per-metric rules). Only if that also
-    fails does the metric stay NULL.
+    12 months (both sides, same nearest-first sampling). If still short, that metric
+    falls back to the channel's current baseline (same pool as above, same per-metric
+    rules). Only if that also fails does the metric stay NULL.
   - baseline_kind when metrics resolve at different tiers (the one genuinely ambiguous
     case): 'era' if *any* metric resolved from a 6- or 12-month window, else 'current' if
     *any* metric used the fallback, else 'insufficient'. This is precedence, not a 3-way
@@ -29,11 +43,13 @@ members must also be older than 180 days", "...falls back to the current baselin
     labelled, and it is unambiguous to compute and to explain.
 
 Both paths, independently per metric (views, likes, comments): drop videos with a NULL
-value for that metric (hidden likes, disabled comments -- never treated as zero), require
-at least 10, take the 20 most recent by published_at, compute the median. A median of
-exactly 0 is stored as-is -- a channel whose comments are genuinely, measurably zero is a
-real fact, not a missing measurement. The divide-by-zero guard belongs in the score view,
-at division time, not here.
+value for that metric (hidden likes, disabled comments -- never treated as zero) and
+require at least 10. The current baseline then takes the 20 most recent by published_at;
+the era baseline takes the 20 nearest to the subject video's published_at, balanced across
+both sides (see above). Either way, the sample is then medianed. A median of exactly 0 is
+stored as-is -- a channel whose comments are genuinely, measurably zero is a real fact, not
+a missing measurement. The divide-by-zero guard belongs in the score view, at division
+time, not here.
 
 A video is never part of its own baseline. For the era pass this does not follow from the
 window alone (a video's own window trivially contains its own date), so it is asserted
@@ -195,13 +211,16 @@ def fetch_latest_stats(video_ids):
 
 
 def compute_metrics_from_pool(pool, exclude_video_id=None):
-    """pool: list of {video_id, published_at, views, likes, comments}, any order. Per
-    metric independently: drop videos with a NULL value for that metric and the excluded
-    video (if any), require at least 10, take the 20 most recent by published_at, median.
+    """Current-baseline sampling: pool is a list of {video_id, published_at, views,
+    likes, comments}, any order. Per metric independently: drop videos with a NULL value
+    for that metric (and the excluded video, if any), require at least 10, take the 20
+    most recent by published_at, median.
 
-    The exclusion is asserted, not just relied upon: for an era window, the subject
-    video's own date trivially sits inside its own window, so the window alone would not
-    keep it out.
+    exclude_video_id is unused by the current baseline's own callers (a young video is
+    never a member of its own pool in the first place, since the pool is mature videos
+    only) but is kept so a caller can assert exclusion where it matters. The era baseline
+    uses its own sampling -- see compute_era_metrics_from_window -- because "most recent
+    20" is wrong for a window centred on the subject video.
     """
     ordered = sorted(pool, key=lambda v: v["published_at"])
     result = {}
@@ -219,6 +238,67 @@ def compute_metrics_from_pool(pool, exclude_video_id=None):
     return result
 
 
+def nearest_balanced_sample(candidates, published_at, per_side=BASELINE_MIN_VIDEOS, cap=BASELINE_CAP):
+    """Up to `cap` candidates nearest to `published_at`, taking at most `per_side` from
+    each side of it (published before / on-or-after) and filling any shortfall on one
+    side from the other side's next-nearest. `candidates`: list of {video_id,
+    published_at, ...}, already filtered to one metric's eligible pool.
+
+    A candidate sharing `published_at` exactly is placed on the "after" side, arbitrarily
+    but consistently -- the split only needs to be deterministic, since real videos this
+    close together are a rounding case, not the common one. Nearness ties (including two
+    candidates sharing a publication time) are broken by video_id, so the sample a frozen
+    video draws does not depend on an unstable sort between runs.
+    """
+    before, after = [], []
+    for c in candidates:
+        (before if c["published_at"] < published_at else after).append(c)
+
+    before.sort(key=lambda c: (published_at - c["published_at"], c["video_id"]))
+    after.sort(key=lambda c: (c["published_at"] - published_at, c["video_id"]))
+
+    chosen = before[:per_side] + after[:per_side]
+    if len(chosen) < cap:
+        leftover = sorted(
+            before[per_side:] + after[per_side:],
+            key=lambda c: (abs(c["published_at"] - published_at), c["video_id"]),
+        )
+        chosen += leftover[:cap - len(chosen)]
+    return chosen
+
+
+def compute_era_metrics_from_window(window, video, exclude_video_id):
+    """window: candidates already restricted to the era time window (see window_slice).
+    Per metric independently: drop videos with a NULL value for that metric and the
+    subject video itself, require at least 10, then take the up-to-20 nearest to the
+    subject's published_at via nearest_balanced_sample, and median them.
+
+    The exclusion is asserted, not just relied upon: the subject's own date trivially
+    sits inside its own window, so the window alone would not keep it out.
+
+    Returns (result, samples): samples[metric] is the actual list of candidates the
+    median was taken over (None where the metric didn't resolve). Cheap to carry --
+    it's the same list objects already built for the median, not a copy -- and it's
+    what --compare-video prints to show a video's real pool, not just its number.
+    """
+    published_at = video["published_at"]
+    result = {}
+    samples = {}
+    for metric in METRICS:
+        eligible = [v for v in window if v[metric] is not None and v["video_id"] != exclude_video_id]
+        assert all(v["video_id"] != exclude_video_id for v in eligible), (
+            f"{exclude_video_id} was not excluded from its own era baseline"
+        )
+        if len(eligible) < BASELINE_MIN_VIDEOS:
+            result[metric] = None
+            samples[metric] = None
+            continue
+        sample = nearest_balanced_sample(eligible, published_at)
+        result[metric] = median(v[metric] for v in sample)
+        samples[metric] = sample
+    return result, samples
+
+
 def build_sorted_pool(pool):
     sorted_pool = sorted(pool, key=lambda v: v["published_at"])
     dates = [v["published_at"] for v in sorted_pool]
@@ -230,14 +310,21 @@ def window_slice(sorted_pool, dates, lo, hi):
 
 
 def compute_era_baseline(video, sorted_pool, dates, cutoff_180, current_baseline):
-    """Returns (baseline_dict, baseline_kind, widened) for one mature video of known
-    format. `current_baseline` is the channel+format's already-computed current baseline,
-    reused as the fallback source rather than recomputed."""
+    """Returns (baseline_dict, baseline_kind, widened, resolved_samples) for one mature
+    video of known format. `current_baseline` is the channel+format's already-computed
+    current baseline, reused as the fallback source rather than recomputed.
+
+    resolved_samples[metric] is the pool the median was actually taken over, for metrics
+    that resolved at the 6- or 12-month tier (None for a metric that used the fallback or
+    stayed unscored). It costs nothing extra to compute -- the sample already exists as
+    part of the median -- and it's what --compare-video shows instead of just a number.
+    """
     published_at = video["published_at"]
     video_id = video["video_id"]
 
     result = {}
     tiers = {}
+    resolved_samples = {}
     widened = False
 
     for window_months in (ERA_WINDOW_MONTHS, ERA_WIDENED_WINDOW_MONTHS):
@@ -250,12 +337,13 @@ def compute_era_baseline(video, sorted_pool, dates, cutoff_180, current_baseline
         lo = shift_months(published_at, -window_months)
         hi = min(shift_months(published_at, window_months), cutoff_180)
         window = window_slice(sorted_pool, dates, lo, hi)
-        window_metrics = compute_metrics_from_pool(window, exclude_video_id=video_id)
+        window_metrics, window_samples = compute_era_metrics_from_window(window, video, exclude_video_id=video_id)
 
         for metric in remaining:
             if window_metrics[metric] is not None:
                 result[metric] = window_metrics[metric]
                 tiers[metric] = "era"
+                resolved_samples[metric] = window_samples[metric]
 
     for metric in METRICS:
         if metric not in result:
@@ -272,7 +360,7 @@ def compute_era_baseline(video, sorted_pool, dates, cutoff_180, current_baseline
         kind = "insufficient"
 
     baseline_dict = {metric: result.get(metric) for metric in METRICS}
-    return baseline_dict, kind, widened
+    return baseline_dict, kind, widened, resolved_samples
 
 
 def update_with_retry(payload, video_ids):
@@ -311,7 +399,55 @@ def metrics_summary(baseline):
     return ", ".join(scored) if scored else "none"
 
 
-def process_channel(channel, cutoff_180, cutoff_24mo, test_mode, era_only, executor, futures):
+def fetch_stored_baseline(video_id):
+    """The video's currently-stored baseline, read fresh right before it would be
+    overwritten -- used only by --compare-video, to print old vs. new."""
+    rows = (
+        supabase.table("videos")
+        .select("video_id, title, published_at, is_short, baseline_views, baseline_likes, baseline_comments, baseline_kind")
+        .eq("video_id", video_id)
+        .execute()
+        .data
+    )
+    return rows[0] if rows else None
+
+
+def print_compare_video(video_id, old_row, baseline_dict, kind, resolved_samples, subject_published_at):
+    """--compare-video's report: old stored baseline next to the new one, and -- for
+    whichever metrics resolved at the 6- or 12-month tier -- the actual pool dates the
+    new median was taken over, so the fix (nearest, not most recent) can be seen
+    directly rather than inferred from the number alone."""
+    print(f"\n--- --compare-video {video_id} ---")
+    print(f"  Subject published: {subject_published_at.date()}")
+    if old_row is None:
+        print("  Not found in the database (nothing stored yet).")
+    else:
+        print(f"  Title: {old_row['title']}")
+        print(f"  Published: {old_row['published_at']}")
+        print(
+            f"  OLD  baseline_views={old_row['baseline_views']} "
+            f"baseline_likes={old_row['baseline_likes']} baseline_comments={old_row['baseline_comments']} "
+            f"kind={old_row['baseline_kind']}"
+        )
+    print(
+        f"  NEW  baseline_views={baseline_dict['views']} baseline_likes={baseline_dict['likes']} "
+        f"baseline_comments={baseline_dict['comments']} kind={kind}"
+    )
+    for metric in METRICS:
+        sample = resolved_samples.get(metric)
+        if sample is None:
+            print(f"  NEW pool ({metric}): none at the 6- or 12-month tier (fallback or insufficient)")
+            continue
+        dates = sorted(v["published_at"] for v in sample)
+        before_count = sum(1 for d in dates if d < subject_published_at)
+        after_count = len(dates) - before_count
+        print(
+            f"  NEW pool ({metric}): {len(dates)} video(s), {dates[0].date()} to {dates[-1].date()} "
+            f"-- {before_count} before subject, {after_count} on/after"
+        )
+
+
+def process_channel(channel, cutoff_180, cutoff_24mo, test_mode, era_only, executor, futures, compare_video_id=None):
     channel_id = channel["channel_id"]
     name = channel["name"]
 
@@ -406,6 +542,10 @@ def process_channel(channel, cutoff_180, cutoff_24mo, test_mode, era_only, execu
             young_insufficient += len(groups["long_form"])
         young_insufficient += len(groups["unknown_format"])
 
+    # Fetched once, before this channel's own writes are submitted below -- see
+    # print_compare_video and --compare-video's help text.
+    compare_old_row = fetch_stored_baseline(compare_video_id) if compare_video_id else None
+
     # --- Era baseline: mature videos (older than 180 days) ---
     sorted_pools = {is_short: build_sorted_pool(mature_pool_candidates[is_short]) for is_short in (True, False)}
 
@@ -416,9 +556,16 @@ def process_channel(channel, cutoff_180, cutoff_24mo, test_mode, era_only, execu
         sorted_pool, dates = sorted_pools[is_short]
         current_baseline = baselines[is_short]
         for v in mature_subjects_by_format[is_short]:
-            baseline_dict, kind, widened = compute_era_baseline(v, sorted_pool, dates, cutoff_180, current_baseline)
+            baseline_dict, kind, widened, resolved_samples = compute_era_baseline(
+                v, sorted_pool, dates, cutoff_180, current_baseline
+            )
             key = (baseline_dict["views"], baseline_dict["likes"], baseline_dict["comments"], kind)
             era_write_groups.setdefault(key, []).append(v["video_id"])
+
+            if compare_video_id and v["video_id"] == compare_video_id:
+                print_compare_video(
+                    compare_video_id, compare_old_row, baseline_dict, kind, resolved_samples, v["published_at"]
+                )
 
             if kind == "era":
                 era_12mo += widened
@@ -478,6 +625,13 @@ def parse_args():
         help="Skip writing the current baseline to young videos (step 7's work); still computes "
              "it in memory, since era videos use it as their fallback.",
     )
+    parser.add_argument(
+        "--compare-video",
+        metavar="VIDEO_ID",
+        help="Print the video's old stored baseline next to the newly computed one, plus the "
+             "actual pool dates the new median was taken over. Diagnostic only -- combine with "
+             "--test and --channel to check a single video by hand before a real run.",
+    )
     return parser.parse_args()
 
 
@@ -509,7 +663,10 @@ def main():
     futures = []
     with ThreadPoolExecutor(max_workers=WRITE_CONCURRENCY) as executor:
         for channel in channels:
-            stats = process_channel(channel, cutoff_180, cutoff_24mo, args.test, args.era_only, executor, futures)
+            stats = process_channel(
+                channel, cutoff_180, cutoff_24mo, args.test, args.era_only, executor, futures,
+                compare_video_id=args.compare_video,
+            )
             totals["channels_processed"] += 1
             if stats["format_missing"]:
                 totals["channels_format_missing"] += 1

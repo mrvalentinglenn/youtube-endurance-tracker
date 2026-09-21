@@ -7,7 +7,10 @@ NEXT_STEPS.md and lands here.
 Entries are chronological. A heading starting with "Rejected:" records an option that was
 considered and dropped, with the reasoning, so it does not get proposed again. A heading starting
 with "SUPERSEDED:" records a decision that was later replaced; it is kept for its reasoning and must
-not be implemented. The replacement is named in the first line of the entry.
+not be implemented. The replacement is named in the first line of the entry. Where only part of an entry is superseded, the affected paragraph is marked **SUPERSEDED** inline,
+its original text is kept as a blockquote, and the replacement follows it. A later change that
+refines an entry without replacing it is recorded as an **Amended** line directly below that
+entry's heading, naming the entry that amends it.
 
 ---
 
@@ -22,8 +25,10 @@ negligible.
 
 ## 2026-09-18 — SUPERSEDED: Outlier Score baseline stays at 24 months
 
+
 **Superseded on 2026-09-18** by "Baseline window: 180 days to 24 months" and "Baseline sample: all
 videos in the window, capped at 20, minimum 10". Kept for the reasoning; do not implement this.
+
 
 ## 2026-09-18 — Videos are never deleted for being old
 
@@ -60,6 +65,8 @@ days may be closer to 60% of their eventual total.
 reference.
 
 ## 2026-09-18 — Baseline sample: all videos in the window, capped at 20, minimum 10
+**Amended 2026-09-21** by "The era baseline takes its nearest neighbours, not the most recent". The
+20 most recent still governs the current baseline; the era baseline now selects differently.
 
 **Decision.** Use every video in the baseline window, but at most the 20 most recent. A channel
 needs at least 10 videos in the window, per format, to get a baseline.
@@ -100,6 +107,10 @@ a median is noise, and with one video the score is 1.0 by construction. A dynami
 possible later as a clearly labelled secondary view, next to the fixed score.
 
 ## 2026-09-18 — Era baseline: videos are scored against their own period
+
+**Amended 2026-09-21** by "The era baseline takes its nearest neighbours, not the most recent". The
+sentence "The cap of the 20 most recent videos in the window still applies" no longer holds for
+this baseline; the rest stands.
 
 **Decision.** A video older than 180 days is scored against the median all-time views of its own
 channel's videos published in a window centred on that video: 6 months before to 6 months after its
@@ -477,7 +488,7 @@ write is_short or similar columns in bulk:**
    a second invocation — the ~500 videos in the failed batch simply stayed NULL and were reclassified
    on the next run.
 
-   ## 2026-09-20 — A video's current value is read from the latest video_stats row
+## 2026-09-20 — A video's current value is read from the latest video_stats row
 
 **Decision.** The front-end view joins each video to its most recent `video_stats` row, computed on
 read. `videos` does not carry denormalised `latest_views`, `latest_likes` or `latest_comments`
@@ -649,6 +660,11 @@ shared client is safe under concurrency on this platform.
 
 ## 2026-09-20 — Residual growth bias in era baselines is accepted
 
+**Amended 2026-09-21** by "The era baseline takes its nearest neighbours, not the most recent".
+Cadence was not the only cause: sampling the window's late end contributed too, and correcting it
+narrowed Castelli's gap. The count-based window rejected below was adopted in a bounded form —
+inside the calendar window — which answers the objection made here.
+
 **Decision.** On channels whose publishing cadence accelerated alongside their growth, old videos
 still score somewhat lower than new ones. This is accepted as a known limitation rather than fixed.
 It belongs in the "how it works" page (step 13), not in a redesign.
@@ -682,7 +698,6 @@ thread-local storage, never sharing one client across threads.
 the first concurrent era-baseline run with a Windows socket error (httpx.ReadError / WinError
 10035). The underlying HTTP connection is not safe to use from several threads at once.
 
-## 2026-09-20 — Paid-promotion threshold raised from 100 to 500
 
 **Decision.** The paid-promotion tooltip appears on `Brand` videos with an Outlier Score of 500 or
 higher, not 100. Everything else about the note is unchanged: wording, tooltip-only placement, and
@@ -907,6 +922,9 @@ silently skipped or repeated between pages and the list still looks entirely pla
 
 ## 2026-09-20 — Scoring moves to a materialised view
 
+**Amended 2026-09-21** by "Upgraded to Supabase Pro". The project did upgrade — for disk space, not
+speed. The argument below against paying to fix a slow query stands.
+
 **Decision.** Two objects. `videos_scored_live` holds the query exactly as it is today — the join,
 the `DISTINCT ON`, the three divisions — and remains the only place the scoring logic exists.
 `videos_scored` becomes a materialised view over it and takes the existing name, so nothing in
@@ -971,6 +989,12 @@ the grant is correct. Read `pg_class.relacl` instead: `anon=r` is the SELECT. Ch
 catalog here would look exactly like a missing grant.
 
 ## 2026-09-20 — The homepage is category sections; "Show more" is navigation
+
+**Amended 2026-09-20** in the step 10 build: the category page is `/category/:categories` and merges
+one or more categories into a single ranking, toggled by a row of category pills. Merging lets a
+marketer rank, for example, professional cyclists, cycling influencers and teams together. It stays
+simple because subcategory choices are stored as exclusions, so toggling a category leaves nothing
+to reconcile. See CLAUDE.md, "Two routes".
 
 **Decision.** Two routes. `/` shows one section per category in fixed order — Brands, Influencers,
 Professional Athletes, Professional Teams, Race Organizers — each with that category's top videos
@@ -1058,12 +1082,24 @@ minutes. The Python client then gave up at its own ~60s HTTP read timeout with `
 but the refresh had already been issued and Postgres completed it regardless, verified by querying
 the view afterwards. So the work succeeded and only the client's report of it failed.
 
-**Consequence for step 6.** The refresh takes over a minute on 98,300 rows. The refresh script must
-raise its own HTTP read timeout, or it will record a failure on a run that actually worked — which
-is worse than a real failure, because it would suppress a successful run's data as if it were
-broken. A monthly job can afford the minute; it cannot afford misreporting it.
+**SUPERSEDED — Consequence for step 6.** Superseded on 2026-09-21 by "Long-running database work
+goes over a direct connection". Kept for the reasoning; do not implement.
+
+> The refresh takes over a minute on 98,300 rows. The refresh script must raise its own HTTP read
+> timeout, or it will record a failure on a run that actually worked — which is worse than a real
+> failure, because it would suppress a successful run's data as if it were broken. A monthly job
+> can afford the minute; it cannot afford misreporting it.
+
+**Consequence for step 6 (2026-09-21).** The refresh now takes about six minutes, and Supabase's
+gateway returns 504 without letting it finish, so no client timeout rescues the RPC route. Step 6
+refreshes over the direct database connection. The function stays in the database but is no longer
+the refresh path.
 
 ## 2026-09-21 — Descriptions truncated to 500 characters; fts stored once
+
+**Amended 2026-09-21** by "Upgraded to Supabase Pro". This was decided to stay under the free
+plan's limit; on Pro it is under review — see NEXT_STEPS.md. Its execution note is also out of
+date: the direct database connection it needs now exists.
 
 **Decision.** Two changes to stay under the Free Plan's 0.5 GB per-project database limit.
 Descriptions are stored truncated to their first 500 characters, on every write. And `fts` is
@@ -1162,3 +1198,164 @@ layout for the same reason.
 **Why no bright header fill.** That project tried one and dropped it: a loud colour on every section
 header made the page shout, and red is now reserved for the paid-promotion flag. The border and the
 structure do the separating.
+
+## 2026-09-21 — Channel avatars are stored in Supabase Storage
+
+**Decision.** Each channel's logo is downloaded once and stored in a public Supabase Storage bucket,
+`channel-avatars`, as `{channel_id}.jpg`. `channels.avatar_url` holds the bucket's public URL.
+`ingestion/sync_avatars.py` does the work, separate from the import script. The card shows a small
+round avatar before the channel name and renders cleanly without one.
+
+**Why stored and not hotlinked.** The Cycling Content Tracker hotlinked Google's CDN first and hit
+429s. A deployed site should not depend on a third-party CDN that has already shown it will
+rate-limit.
+
+**Why a separate script.** Step 6 can call it on each monthly run, and it keeps decoration off the
+import's failure path: a failed avatar must never fail an import.
+
+**Failure keeps the existing value.** A failed download or upload skips that channel without
+touching `avatar_url`, and a channel with no thumbnail in the API response is skipped rather than
+written as NULL. First run: 342 of 342 uploaded, 7 quota units.
+
+**One library trap, recorded because the obvious fix is wrong.** The Cycling Content Tracker's
+lesson was that storage3's upsert flag must be the string `"true"`. In storage3 2.31.0 the real rule
+is different: `.update()` strips the `x-upsert` header entirely, so it cannot create a file that
+does not exist yet, and a first run would have failed on all 342 channels. `.upload()` both creates
+and overwrites. Found by reading the installed package's source, not by assuming.
+
+**The bucket lives outside the repo.** It is not a SQL object, so a rebuilt project needs it
+created by hand, or the site comes up with no avatars and no error.
+
+**Adding the column to the view.** A materialised view's columns are fixed at creation, so
+`videos_scored` had to be dropped and recreated. In the SQL editor this timed out twice; each time
+it ran as one transaction and rolled back cleanly. It was done instead through a one-off
+`security definer` function called over RPC, which completed server-side, and the function was
+dropped afterwards — a function able to drop the view should not stay around.
+
+## 2026-09-21 — FloTrack's dominance is handled by a channel filter, not by special-casing
+
+**Decision.** FloTrack's high Relative scores are left as the method produces them. Users who find
+it irrelevant switch it off with the channel filter (NEXT_STEPS.md, step 10c). Nothing in the
+scoring treats it differently from any other channel.
+
+**The calculation is correct.** Its top video's baseline was rebuilt by hand: stored 1,923,
+recomputed 1,922.5.
+
+**Why it scores so high.** FloTrack publishes about 99 long-form videos a month, against an average
+of 4. Over half get under 5,000 views, and its median is 3,993 against 11,659 for all channels. Its
+normal is low, so every genuine hit — a world record, a national record — divides into it
+enormously. That is the score doing what it is designed to do.
+
+**Why not special-case it.** A per-channel exception is a rule someone has to remember, and it would
+hide exactly what the Outlier Score exists to show. What was wrong was relevance, not measurement —
+the same distinction that led the Cycling Content Tracker to its own channel exclusion filter for
+Red Bull Bike.
+
+**Its category is a separate question, left as it is.** FloTrack is filed as Influencer, where it
+sits among individual creators while mostly broadcasting other athletes' races. It crowds out other
+Influencers wherever that category is shown. Kept by choice; the channel filter covers it.
+
+**What the hand check found instead.** The rebuilt baseline showed every one of its 20 videos
+published in a single week, six months after the video being scored — which led to the next entry.
+
+## 2026-09-21 — The era baseline takes its nearest neighbours, not the most recent
+
+**Decision.** Within the era window, a video's baseline is drawn from up to the 10 nearest videos
+published before it and the 10 nearest published after it, by publication date. If one side has
+fewer than 10, the remaining places are filled from the other side, up to 20 in total. Ties are
+broken by `video_id`. Widening to 12 months, the current-baseline fallback and `'insufficient'` are
+unchanged. The current baseline keeps "the 20 most recent".
+
+**Why.** Both baselines used to take the 20 most recent videos in their window. That suits the
+current baseline, whose window ends today. For the era baseline it defeats the centring the window
+exists for: "most recent" means the window's late end, so any channel with more than 20 mature
+videos in the window was compared only with what it published afterwards. FloTrack's top video,
+published 2024-04-01, had its baseline drawn from 2024-09-24 to 30 — one week, six months later.
+
+**Why balanced with fill, rather than strictly balanced.** Strict symmetry takes only as many from
+the longer side as the shorter side has. Videos just past 180 days have few mature neighbours after
+them, and the oldest have few before them, so strict symmetry would often drop them below the
+minimum of 10 and cost them their era score. Filling keeps the comparison as centred as the data
+allows without discarding usable videos.
+
+**Why this is not the option rejected on 2026-09-20.** Two entries rejected count-based selection,
+because on a channel with a long publishing gap the "neighbours" could be a year or more away. That
+objection applied to replacing the calendar window. Here the ±6-month window stays as the hard
+boundary, and the count only chooses within it.
+
+**Why the tie-break.** CLAUDE.md requires a frozen video's score not to change between runs. An
+unstable ordering between equally near videos would break that with nothing else having changed.
+
+**Measured.** Old baselines were snapshotted to `ingestion/baseline_snapshot.csv` before the run and
+compared with `ingestion/compare_baselines.py`. FloTrack's top video went from 2,739.7× to 1,017.5×
+(baseline 1,922.5 → 5,176.5). `baseline_kind` barely moved: era +83, current −56,
+insufficient −27. But 50,362 of 96,643 comparable videos had their views baseline change by more
+than 20%, led by event-coverage channels whose output is seasonal: FloTrack 89%, USA Swimming 87%,
+supertri, Aravaipa Running, Epic Series. For them, "six months later" meant a different season. On
+Castelli, the oldest quartile's median score rose from 0.38 to 0.59 against an unchanged 1.14 — so
+late-end sampling was a real cause of the residual growth bias, though not the only one.
+FloTrack's share of the default top 60 fell from 11 to 8.
+
+**A caveat on those figures.** The script's recomputed "old" quartile figures do not match the ones
+recorded on 2026-09-20, so the earlier script defined its quartiles differently. The old-versus-new
+comparison is sound, since both went through the same code, but the absolute values are not
+comparable with the earlier entry's. The Feed could not be checked: its YouTube name differs from
+"The Feed".
+
+## 2026-09-21 — Long-running database work goes over a direct connection
+
+**Decision.** Anything long-running — refreshing `videos_scored`, `VACUUM FULL`, rebuilding the view
+— runs over a direct Postgres connection with `psycopg`, using `SUPABASE_DB_URL` from the root
+`.env`, not through the SQL editor or an RPC.
+
+**Why.** Both of those sit behind Supabase's web gateway, which cuts requests off: the editor returns
+"upstream timeout", and after the baseline recompute the refresh RPC returned 504 without the
+refresh completing. Earlier the same RPC had finished server-side after the client gave up; after
+the recompute it no longer did. Over the direct connection the refresh took 358 seconds — far past
+any gateway's window, so no timeout setting could have rescued the RPC route.
+
+**Why the Session pooler string.** Supabase's direct connection typically needs IPv6, which many home
+networks and some runners lack. The Session pooler works over IPv4.
+
+**What it costs.** A second way of talking to the database, and the database password sitting in
+`.env`. A reserved character in the password must be percent-encoded in the URL — `@` becomes `%40`
+— or the connection string misparses.
+
+## 2026-09-21 — Upgraded to Supabase Pro
+
+**Decision.** The project moved to the Pro plan, and its disk was expanded manually.
+
+**Why.** The free plan's limit had already been passed, but what forced it was the disk physically
+filling. The baseline recompute rewrote all 98,300 rows of `videos`, leaving the old versions behind
+until cleanup (684 MB measured). A concurrent refresh then builds a complete second copy of the view
+plus temporary files to compare the two, and failed with `DiskFull`. On a full disk, every way of
+freeing space needs space first: a refresh needs room for a new copy, and so does `VACUUM FULL`.
+
+**Why expand manually as well.** Upgrading does not enlarge the disk. Pro disks auto-scale once usage
+reaches 90%, but a single burst of temporary files outruns the resize. The refresh failed again
+after the upgrade and succeeded only after a manual expansion. Resizes are rationed, so it was done
+in one step.
+
+**What this changes.** The truncation and `fts` decision of 2026-09-21 was made to stay on the free
+plan, and is now under review. Moving back to the free plan later is possible only if usage fits its
+limits, so that decision and this one belong together.
+
+**Relation to the materialised-view entry.** That entry rejected paying to fix a slow query, and that
+argument stands: the query was fixed properly. This upgrade answers a different problem — storage —
+which no query change could solve.
+
+## 2026-09-21 — service_role can read videos_scored
+
+**Decision.** `service_role` is granted SELECT on `videos_scored`, alongside `anon`.
+
+**Why.** Verification scripts need to check what the app actually sees. Without the grant, the
+comparison report failed with "permission denied" — the same error Claude Code hit when verifying
+step 9, which at the time looked like a deliberate limit rather than a missing grant.
+
+**Why it is safe.** `service_role` can already read every table the view is built from. The grant
+shows it nothing new.
+
+**Two things that make grants easy to lose track of.** Dropping and recreating the view drops both
+grants with it; they must be reissued. And `information_schema` describes neither the grants nor
+the columns of a materialised view, so checking there shows nothing even when both exist. Check
+`pg_class.relacl` for grants and `pg_attribute` for columns.

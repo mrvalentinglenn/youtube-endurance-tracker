@@ -14,21 +14,14 @@ Working document. Tick off what is done and add new questions as they come up.
       label. Fixing it means the same kind of one-off spreadsheet edit as the triathlon-tagging fix
       earlier (channels.subcategory in the DB, then the front end's hardcoded string, then a
       re-import) — flagging rather than doing it, since the spreadsheet is read-only input.
-- [ ] **Database is over the Free Plan size limit.** Measured 2026-09-21: 0.65 GB against a 0.5 GB
-      per-project limit. Breakdown at the time: `videos` 329 MB, `videos_scored` 244 MB including
-      its indexes, `video_stats` 21 MB, `channels` 200 kB. The 56 MB GIN index on `videos.fts` was
-      unused since step 7c and has been dropped, bringing the total to roughly 0.59 GB. The main
-      remaining cause is `fts` stored twice — on `videos` and inside the materialised view — plus
-      long descriptions feeding it. The archive grows ~18 MB a month by design, since videos are
-      never deleted.
-      **Plan: shrink the database first (step 7d), which should reach ~320 MB and buy a year or
-      more on the free tier. Upgrading to Supabase Pro ($25/month) remains the fallback if the
-      measurements after 7d come in higher, or if growth outpaces them.** No grace-period notice
-      received yet in email or the dashboard as of 2026-09-21 — check both regularly until 7d is
-      done. When restrictions apply, every request returns 402, so the front end goes down as well
-      as ingestion, and community reports suggest it can affect every project in the organisation,
-      including the live Cycling Content Tracker. Cleaning up afterwards has not reliably lifted
-      restrictions without a support ticket.
+- [ ] **Is step 7d still needed now the project is on Pro?** On 2026-09-21 the database ran out of
+      disk — a concurrent refresh of `videos_scored` failed with `DiskFull` — and the project was
+      upgraded to Supabase Pro, with the disk then expanded manually, since upgrading alone does not
+      enlarge it. Last measured size: 684 MB, inflated by the step 8b baseline recompute, which left
+      an old version of every `videos` row behind. Step 7d was designed to stay under the free
+      tier's 0.5 GB; on Pro it is optional. Two things decide it: whether moving back to the free
+      plan is wanted (Supabase allows it only if usage fits the free limits), and how fast the
+      archive grows once step 6 runs. Measure the current size first.
 
 ## Data issues in data/channels_complete.xlsx
 
@@ -58,12 +51,19 @@ Working document. Tick off what is done and add new questions as they come up.
        it is written once (`ingestion/classify_shorts.py`). Throttling settled at concurrency 20, no
        delay (see DECISIONS.md, 2026-09-20). Done: 62,215/62,215 classified, 48,925 Shorts / 49,375
        long-form total in the database, 0 left NULL, 0 request failures, 0 429s, no drift-guard trip.
-6. [ ] **Refresh script.** Adds new videos and re-measures videos younger than 180 days. Also
-       re-fetches all channels via `channels.list` and updates `name` and `subscriber_count`
-       (~7 quota units). This is the script the 30-day run calls. Refreshes `videos_scored` as its final step, after its own checks pass; a failed refresh
-        fails the run.         Must raise its own HTTP read timeout above 60 seconds before calling
-        `refresh_scoring_view()` — the refresh takes over a minute, and the default client timeout
-        reports a failure on a run that succeeded. See DECISIONS.md, 2026-09-20.
+6. [ ] **Refresh script — the 30-day run.** Adds videos published since the last run, re-measures
+       videos younger than 180 days, and re-fetches all channels via `channels.list` to update
+       `name` and `subscriber_count` (~7 quota units). Then recomputes baselines
+       (`compute_baselines.py`), since CLAUDE.md places the baseline computation in the 30-day run.
+       Refreshes `videos_scored` as its final step, only after its own checks pass; a failed refresh
+       fails the run. Truncates descriptions to 500 characters on write, per CLAUDE.md — unless
+       step 7d's open question reverses that decision.
+       **The refresh must use the direct database connection** (`psycopg`, `SUPABASE_DB_URL` in the
+       root `.env`), not the `refresh_scoring_view()` RPC. Measured 2026-09-21: a concurrent refresh
+       takes ~358 seconds, far past Supabase's gateway, which returns 504 and does not let it
+       complete. `ingestion/refresh_scoring_view.py` still uses the RPC route and needs rewriting
+       before step 6 relies on it. Set a session `statement_timeout` for the refresh; 30 minutes was
+       used.
 7. [x] **Outlier Score, current baseline.** Compute the current baseline per channel, split by
        Shorts and long-form, for all three metrics (views, likes, comments) — `ingestion/
        compute_baselines.py`. Videos with null likes or comments are excluded from that metric's
@@ -87,33 +87,45 @@ Working document. Tick off what is done and add new questions as they come up.
         218 entries and stops, with no join, no `DISTINCT ON` and no sort. Cold versus warm is no
         longer a distinction: the query reads index pages, not 52MB of heap. 98,300 rows in both
         objects. Verified in the browser after an idle period.  
-7d. [ ] **Shrink the database to stay on the free tier.** Measured 2026-09-21 on a 10% sample:
-        truncating descriptions to 500 characters takes them from ~62 MB to ~36 MB, and `fts` —
-        built from the description and stored twice — from ~115 MB to ~68 MB per copy. Two parts:
-        (1) truncate every description to 500 characters, (2) remove the duplicate `fts` from
-        `videos`, keeping only the copy in the materialised view. Estimated total ~320 MB, against
-        ~540 MB today and a 500 MB limit. Median description is 535 characters, p90 1,649 — the
-        tail is mostly sponsor links, timestamps and social handles.
-        **Do this before step 6**, which must truncate descriptions on write or the archive fills
-        back up. Needs a direct database connection: an update writes new row versions, so the
-        table grows before it shrinks, and only `VACUUM FULL` reclaims the space — which cannot
-        run inside a function, so the RPC route used elsewhere does not work. Changes CLAUDE.md's
-        "Store the full video description" rule; record the decision in DECISIONS.md first.
-        Reversible: descriptions can be re-fetched from the API for ~2,000 quota units.              
+7d. [ ] **Shrink the database** — optional since the Pro upgrade; see the open question. Measured
+        2026-09-21 on a 10% sample: truncating descriptions to 500 characters takes them from ~62 MB
+        to ~36 MB, and `fts` — built from the description and stored twice — from ~115 MB to ~68 MB
+        per copy. Two parts: (1) truncate every description to 500 characters, (2) remove the
+        duplicate `fts` from `videos`, keeping only the copy in the materialised view. Estimated
+        ~320 MB once complete. Returning the space needs `VACUUM FULL` of `videos`, which would also
+        clear the old row versions left by the step 8b recompute. `VACUUM FULL` cannot run inside a
+        function, but runs over the direct database connection set up on 2026-09-21. Decided in
+        DECISIONS.md, 2026-09-21. Reversible: descriptions can be re-fetched for ~2,000 quota units.             
 8. [x] **Era baselines.** Extended `ingestion/compute_baselines.py` with the era baseline for mature
        videos: 6-month window centred on the video's own date, widening to 12 months, falling back to
        the current baseline, then `'insufficient'`. Done: 342/342 channels, 0 write failures, every one
        of the 98,300 videos now has a `baseline_kind` (76,404 `'era'`, 20,247 `'current'`, 1,649
        `'insufficient'`, 0 still `NULL`). See the verification finding below — real improvement, not a
        complete fix for the steepest-growth channels.
+8b. [x] **Era baseline: nearest neighbours instead of most recent.** The era baseline took the 20
+        *most recent* videos in its ±6-month window, which always samples the window's late end:
+        FloTrack's top video, published 2024-04-01, had its baseline drawn from a single week,
+        2024-09-24 to 30. Changed in `compute_baselines.py` to up to 10 nearest videos before and 10
+        after, by publication date, filling from the other side when one runs short, tie-broken by
+        `video_id`. The current baseline is unchanged. Old baselines snapshotted to
+        `ingestion/baseline_snapshot.csv` (gitignored) and compared with
+        `ingestion/compare_baselines.py`.
+        Results: FloTrack's top video 2,739.7× → 1,017.5× (baseline 1,922.5 → 5,176.5).
+        `baseline_kind` barely moved (era +83, current −56, insufficient −27). 50,362 of 96,643
+        comparable videos' views baselines changed by more than 20%, led by event-coverage channels
+        (FloTrack 89%, USA Swimming 87%, supertri, Aravaipa Running, Epic Series), whose output is
+        seasonal. Castelli's oldest-quartile median score rose 0.38 → 0.59 against an unchanged
+        1.14, so late-end sampling was a real cause of the residual growth bias, though not the only
+        one. FloTrack's share of the default top 60 fell 11 → 8. The Feed was not checked: its
+        YouTube name differs from "The Feed". View refreshed over the direct connection in 358
+        seconds and verified.       
 9. [x] **Front-end: results list.** `frontend/src/lib/videos.js` (`fetchVideos`), `frontend/src/
        components/VideoCard.jsx`, `frontend/src/App.jsx`. Video cards with thumbnail, title, channel,
        publication date, views, likes and comments. Outlier Score shown under Relative only. "Still
        growing" label on videos younger than 180 days, shown alongside the score. Verified in a real
        headless browser (Playwright), not just against Python/the secret key: cards render, both
        toggles work across all 6 metric/comparison combinations, sort order and top score match
-       step 7b's own verification numbers exactly (TrainingPeaks, 21.6K). See the open question below
-       about an intermittent database error hit during that verification.
+       step 7b's own verification numbers exactly (TrainingPeaks, 21.6K). The intermittent timeout hit during that verification was the cold-cache problem fixed in step 7c.
 9a. [x] **Card layout and score formatting.** Outlier Score in a badge on the top left of the
         thumbnail, "still growing" as a badge on the top right (shown under both Absolute and
         Relative), duration badge bottom-right (`M:SS` / `H:MM:SS`, absent on NULL or 0), positional
@@ -135,19 +147,21 @@ Working document. Tick off what is done and add new questions as they come up.
         celebrity-campaign examples (adidas "Backyard Legends", La Sportiva "Exodia") flagged via
         likes/comments while their views score sits under 500, staying flagged and red across every
         metric toggle including Absolute.
-9c. [ ] **Channel avatars on the card.** A small round channel logo beside the channel name. Needs
-        an `avatar_url` column on `channels`, the ingestion scripts fetching it from
-        `channels.list`, and the images served from a Supabase Storage bucket rather than hotlinked
-        — the Cycling Content Tracker hotlinked Google's CDN first and hit 429s. A Storage bucket is
-        not a SQL object, so it lives outside the repo and a rebuild needs it created by hand, or
-        the site comes up with no avatars and no error. Cards must render without an avatar
-        regardless, since a newly added channel has none until the next refresh.        
-9d. [x] **Apply the influencer sport correction to the database.** The spreadsheet edit is done
-        (DECISIONS.md, 2026-09-20). Re-run `ingestion/import_channels.py` so the five channels'
-        `is_cycling` flag updates in the `channels` table, then
-        `refresh materialized view concurrently public.videos_scored;` so the app sees it. Verify
-        with a query that the five channels have `is_cycling = false` and `is_triathlon = true` in
-        both the table and the view.              
+9c. [x] **Channel avatars on the card.** Public Storage bucket `channel-avatars` created by hand. It
+        is not a SQL object, so a rebuild of the project needs it recreated, or the site comes up
+        with no avatars and no error. `avatar_url` added to `channels`; `ingestion/sync_avatars.py`
+        fetches each thumbnail from `channels.list`, uploads it as `{channel_id}.jpg` and writes the
+        public URL: 342/342 uploaded, 0 skipped, 7 quota units. Uploads must use storage3's
+        `.upload()`, not `.update()`, which strips the upsert header in version 2.31.0.
+        `avatar_url` appended to `videos_scored_live`; `videos_scored` rebuilt through a one-off
+        `rebuild_scoring_view()` function called over RPC, since the SQL editor timed out, and the
+        function dropped afterwards. A drop-and-recreate of the view loses its grants — reissue
+        SELECT to `anon` and `service_role`. The card shows a small round avatar before the channel
+        name, hidden when NULL or when the image fails to load.      
+9d. [x] **Apply the influencer sport correction to the database.** Spreadsheet edited, import
+        re-run (357 read, 15 skipped, 342 written, 0 orphans, 7 quota units), `videos_scored`
+        refreshed. Verified: the five channels have `is_cycling = false` and `is_triathlon = true`
+        in both `channels` and the view.             
 10. [x] **Front-end: routes and filters.** `react-router-dom` v7 added. `frontend/src/lib/filters.js`
         (the single-sourced category mapping, subcategory taxonomy, sport/date definitions,
         `DEFAULT_FILTERS`, `resolveFilters`), `frontend/src/lib/videos.js` (one shared `fetchVideos`
@@ -179,11 +193,24 @@ Working document. Tick off what is done and add new questions as they come up.
         directly, not just watching the URL bar; Shorts format renders a real 9:16 grid. Zero
         console errors and zero `57014`s across the whole session — the materialised view (step 7c)
         holding under real query variety, not just the one shape it was measured against.
-
+10b. [x] **Front-end polish.** The paid-promotion mark is a warning triangle drawn as SVG. Score
+         badges are purple by default and red when the video is flagged — by the video-level flag,
+         not the displayed number. Dark mode with a header toggle, dark on a first visit,
+         remembered in `localStorage`, and applied by an inline script in `index.html` before React
+         renders; Tailwind 4's `dark:` variant switched to class-based. Homepage sections are
+         framed: a bordered container, a centred header bar, and "Show more" inside at the bottom.
+         See DECISIONS.md, 2026-09-21.
+10c. [ ] **Channel filter.** Let users deselect individual channels — for example FloTrack, which
+         publishes ~99 long-form videos a month and crowds out other Influencers wherever that
+         category is shown. Store only the deselected channels in the URL, like `nosub`, and show
+         them as removable chips, so a filtered list never looks like a short one — the Cycling
+         Content Tracker's pattern. The front end cannot read `channels`, which is RLS-sealed, so
+         this needs a small read-only view of channel id, name, category and subcategory, granted
+         to `anon`. That view could also replace the subcategory list hardcoded in `filters.js`.         
 11. [ ] **Deploy to Vercel** and add the environment variables there.
 12. [ ] **GitHub Actions workflow.** Schedule the refresh script monthly, with the keys in GitHub
         Secrets, modelled on the Cycling Content Tracker's workflow. Trigger it manually once to
-        confirm it works.
+        confirm it works. Include `SUPABASE_DB_URL` in GitHub Secrets: the refresh runs over the direct database connection.
 12b. [ ] **Daily Shorts reclassify workflow.** A short script selecting videos with `is_short`
         NULL, re-running the HEAD check and writing back the result. Scheduled daily via GitHub
         Actions. Same script as backfill phase two (`ingestion/classify_shorts.py`). This is also
