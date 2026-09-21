@@ -922,6 +922,10 @@ silently skipped or repeated between pages and the list still looks entirely pla
 
 ## 2026-09-20 — Scoring moves to a materialised view
 
+**Amended 2026-09-21** by "Category-first sort indexes on videos_scored". The one index per sort
+column described under "Indexes are the point" was replaced; the reasoning about `nulls last`
+stands.
+
 **Amended 2026-09-21** by "Upgraded to Supabase Pro". The project did upgrade — for disk space, not
 speed. The argument below against paying to fix a slow query stands.
 
@@ -990,6 +994,10 @@ catalog here would look exactly like a missing grant.
 
 ## 2026-09-20 — The homepage is category sections; "Show more" is navigation
 
+**Amended 2026-09-21** by "One hierarchical filter replaces the category toggles, pills and
+subcategory control". The category pills are gone; the category page's categories are set with the
+same filter as the homepage.
+
 **Amended 2026-09-20** in the step 10 build: the category page is `/category/:categories` and merges
 one or more categories into a single ranking, toggled by a row of category pills. Merging lets a
 marketer rank, for example, professional cyclists, cycling influencers and teams together. It stays
@@ -1017,6 +1025,10 @@ so the videos already seen appear again at the top. Nothing is on screen twice, 
 homepage is gone. It also keeps the page boundaries on round numbers.
 
 ## 2026-09-20 — What each filter does, now that the homepage is sectioned
+
+**Amended 2026-09-21** by "One hierarchical filter replaces the category toggles, pills and
+subcategory control". What each level does stands; the separate controls became one, with channels
+as a third level.
 
 **Decision.** Category, subcategory and sport each act at a different level.
 
@@ -1234,6 +1246,10 @@ dropped afterwards — a function able to drop the view should not stay around.
 
 ## 2026-09-21 — FloTrack's dominance is handled by a channel filter, not by special-casing
 
+**Amended 2026-09-21** by "One hierarchical filter replaces the category toggles, pills and
+subcategory control". The channel filter was built as the channel level of the category filter,
+not as a separate control.
+
 **Decision.** FloTrack's high Relative scores are left as the method produces them. Users who find
 it irrelevant switch it off with the channel filter (NEXT_STEPS.md, step 10c). Nothing in the
 scoring treats it differently from any other channel.
@@ -1304,6 +1320,9 @@ comparable with the earlier entry's. The Feed could not be checked: its YouTube 
 
 ## 2026-09-21 — Long-running database work goes over a direct connection
 
+**Amended 2026-09-21** by "Plain refreshes while there are no visitors; compact after concurrent
+ones". `ingestion/refresh_scoring_view.py --direct` now implements this for the refresh.
+
 **Decision.** Anything long-running — refreshing `videos_scored`, `VACUUM FULL`, rebuilding the view
 — runs over a direct Postgres connection with `psycopg`, using `SUPABASE_DB_URL` from the root
 `.env`, not through the SQL editor or an RPC.
@@ -1359,3 +1378,148 @@ shows it nothing new.
 grants with it; they must be reissued. And `information_schema` describes neither the grants nor
 the columns of a materialised view, so checking there shows nothing even when both exist. Check
 `pg_class.relacl` for grants and `pg_attribute` for columns.
+
+
+## 2026-09-21 — "Incluencer Cycling" corrected in the data and the code together
+
+**Decision.** The subcategory "Incluencer Cycling" was a typo for "Influencer Cycling". It was
+corrected in `data/channels_complete.xlsx` (27 cells in column F), in the subcategory list then
+hardcoded in `frontend/src/lib/filters.js`, and in the database through the import script and a
+refresh. Verified afterwards: no "Incluencer" left in `channels` or `videos_scored`, and 27
+channels and 21,887 videos under "Influencer Cycling".
+
+**Why all at once.** The front end matched the database string exactly, so fixing the data alone
+would have made the Influencer Cycling filter match nothing until the code caught up. It also had to
+go before the category filter was built (next entry), which takes its subcategory labels from the
+database and would have shown the typo in every Influencers dropdown.
+
+**Why a script and not a hand edit.** A second deliberate exception to the rule that no script
+modifies the spreadsheet, requested explicitly because no spreadsheet editor was available. As with
+the triathlon influencers, the script was deleted afterwards. The rule stands.
+
+**What it cost, and why.** The spreadsheet, the code and the import took seconds; the refresh took
+222 seconds. A materialised view has no partial refresh — every refresh rebuilds all 98,300 rows
+however little changed — which is the price of reads under a millisecond. Batch data fixes into one
+refresh where possible.
+
+## 2026-09-21 — One hierarchical filter replaces the category toggles, pills and subcategory control
+
+**Decision.** Category, subcategory and channel selection are one control: five dropdowns in the
+filter bar, one per category, identical on both routes. Each holds a category checkbox, a channel
+search, and collapsible subcategory groups with their channels, with three-state checkboxes at
+category and subcategory level. The category page's pills row is gone, replaced by a plain "Back to
+home" link. The tree comes from a new plain view, `channels_public`, readable by `anon`, which also
+retires the subcategory list hardcoded in `filters.js`.
+
+**Why one control.** The data already has this shape — category, subcategory, channel — so the
+control mirrors how the channels are organised, and it answers the question of finding one channel
+among 342: FloTrack sits under Influencers, in its subcategory, where one would look. A flat,
+searchable channel list was proposed first and dropped in favour of this.
+
+**Why each page keeps its own category selection.** On the homepage the category checkboxes decide
+which sections appear (`nocat`); on the category page they decide which categories are merged (the
+path). Same control, two different questions. One shared state would make "Show more" on Brands
+leave the homepage showing only Brands on the way back. Subcategory and channel exclusions are
+shared across both routes.
+
+**Why exclusions are stored at the level they were made.** Switching off the Nutrition subcategory
+records "Nutrition" in `nosub`, not today's list of nutrition brands, so a brand added next month is
+excluded as the user intended. `nochan` holds only channels switched off individually, by ID, since
+names change with sponsors. Checkbox states are derived from these, never stored.
+
+**Why channels outside the sport filter are dimmed, not hidden.** Hiding them would change the shape
+of the tree as sports are toggled, and leave the user wondering where a channel went. Dimming shows
+why a channel has no videos while keeping it in place. The button counts ignore the dimming, since
+each button describes its own control.
+
+**Why groups start collapsed, except where something is off.** Expanded, Brands alone would fill the
+screen. A group containing a switched-off channel opens by default, so the exclusion can be seen
+rather than hunted for. Channel names appear without avatars, to keep 170 Brands compact enough to
+scan.
+
+## 2026-09-21 — Plain refreshes while there are no visitors; compact after concurrent ones
+
+**Decision.** Until the site is deployed, `videos_scored` is refreshed with a plain
+`REFRESH MATERIALIZED VIEW`, not `CONCURRENTLY`. Once it is live, refreshes are concurrent, with an
+occasional plain one at a quiet moment to compact. Refreshes go through
+`ingestion/refresh_scoring_view.py --direct`; its RPC mode is to be removed when step 6 is built.
+
+**Why.** A concurrent refresh keeps the view readable by building a new copy, comparing it with the
+old one, and applying the differences as updates — which leaves the old row versions behind. Two
+concurrent refreshes that each rewrote a large share of rows, the baseline recompute and the typo
+fix, took `videos_scored` from 244 MB to 556 MB. Bloat is not only a disk cost: every query reads
+more pages, which fed directly into the category-page timeouts. One plain refresh rebuilt it at
+240 MB in 177 seconds, blocking reads while it ran — harmless with no visitors.
+
+**Why remove the RPC mode rather than keep it for small refreshes.** There is no small refresh:
+every one rebuilds the whole view. A mode that returns 504 on every real refresh is a trap for
+whoever reaches for it next.
+
+## 2026-09-21 — Category-first sort indexes on videos_scored
+
+**Decision.** The six plain sort indexes on `videos_scored` were replaced by twelve: six
+category-first, `(category, is_short, <col> desc nulls last)`, and six format-first,
+`(is_short, <col> desc nulls last)`, over `views`, `likes`, `comments`, `score_views`,
+`score_likes` and `score_comments`. Sixteen in total, with the unique `video_id`, `published_at`,
+`is_short` and `fts` indexes.
+
+**The problem.** The category page intermittently failed with a statement timeout. A ranking reads
+its sort index from the top and keeps rows that match the filters until it has 60. For a single
+category, that meant walking past thousands of higher-ranked rows from other categories and from
+the other format: the failing Professional Teams query read 8,353 pages to return 60 videos, and an
+Absolute variant took 2,499 ms with real disk reads, against `anon`'s 3-second limit. Whether it
+failed depended on what happened to be cached.
+
+**Measured before anything was committed.** Candidate indexes were created inside a transaction,
+measured with `explain (analyze, buffers)`, and rolled back. Pages touched is the figure that
+matters, since it does not depend on the cache. Category-first took the failing query from 8,353
+pages to 156, and a homepage section from 818 to 9. Format-first cut the merged-category case from
+7,394 to 4,204.
+
+**Why no plain sort indexes.** Every query filters on `is_short`, since format is a required choice,
+so a format-first index does everything a plain one did with half the walk. The Cycling Content
+Tracker's indexes also led with format; here category-first proved the larger win, because every
+query also targets a category.
+
+**Why keep the format-first indexes.** Since merged rankings are now fetched per category (next
+entry), no current query uses them. They cost about 12 MB and cover any future query without a
+single-category condition.
+
+**Built after compacting the view**, so the new indexes started from 240 MB rather than 556. Verified
+fully cold: the failing query now reads 156 pages in about 250 ms.
+
+**Also fixed, found in the failing URL.** It carried `sports` with all four sports listed, which
+equals the default and should store nothing. Selecting all four now removes the param, so the query
+carries no sport condition at all.
+
+## 2026-09-21 — Merged rankings are fetched per category and merged in the browser
+
+**Decision.** When the category page covers several categories, it sends one query per category in
+parallel — same filters, same sort, limit 60 — merges them in the browser, sorting exactly as the
+database does, and keeps the first 60. A single category is still one query.
+
+**Why.** Even with the new indexes, a two-category merge sent as one query read 4,204 pages and took
+5.3 seconds cold: category-first indexes cannot return rows in order across an `IN` list, so
+Postgres walked a format-first index past every other category instead. Merging categories is a
+core use — ranking professional cyclists, cycling influencers and teams together — so this was not
+accepted as an edge case. Per category, each query reads its own category-first index: two
+categories now touch 339 pages, five touch 1,425.
+
+**Why it gives the same answer.** Any video in the combined top 60 must be in its own category's top
+60. Verified against the old single query for two and five categories: all 60 IDs matched, in the
+same order.
+
+**Two rules that make it correct.** The browser's merge sorts descending with NULLs last, so under
+Relative an unscored video never sits above a scored one. And if any one category's query fails,
+the whole ranking shows the error: a ranking missing a category would look complete and be wrong.
+
+**The margin.** The slowest single category is Influencers at about 800 pages — roughly 1.6 seconds
+fully cold at about 2 ms per uncached page. Inside the 3-second limit, but the query to watch as the
+archive grows.
+
+**A known property, not a bug.** Among videos with equal scores — in practice mostly the unscored
+videos filling the bottom of a narrow ranking — the order is undefined, and the merged and
+single-query paths can pick different ones. The database never guaranteed an order there; the
+single query only looked stable because it always walked the same index. Making ties deterministic
+would mean adding `video_id` to all twelve sort indexes and rebuilding them — real work for an
+effect visible only in a nearly empty ranking. Left as it is.

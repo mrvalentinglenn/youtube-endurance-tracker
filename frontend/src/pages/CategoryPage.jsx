@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react'
-import { useParams, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { CATEGORIES, categoryBySlug, resolveFilters } from '../lib/filters'
 import { fetchVideos } from '../lib/videos'
 import FilterBar from '../components/FilterBar'
-import CategoryPills from '../components/CategoryPills'
 import VideoGrid from '../components/VideoGrid'
 import ThemeToggle from '../components/ThemeToggle'
 
@@ -12,6 +11,7 @@ const PAGE_LIMIT = 60
 export default function CategoryPage() {
   const { categories: categoriesParam } = useParams()
   const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
   const filters = resolveFilters(searchParams)
 
   const requestedSlugs = (categoriesParam || '').split(',').map((s) => s.trim()).filter(Boolean)
@@ -22,6 +22,22 @@ export default function CategoryPage() {
   const selectedSlugs = selectedCategories.map((c) => c.slug)
   const categoryDbValues = selectedCategories.map((c) => c.dbValue)
 
+  // Category on/off lives in the path here, not a query param -- toggling navigates to a
+  // new /category/... path, carrying every other filter unchanged. No chips and no
+  // "clear" step for this level: there's nothing stored to clear, just a selection.
+  const categoryState = {
+    isOn: (slug) => selectedSlugs.includes(slug),
+    setOn: (slug, on) => {
+      const nextSlugs = on ? [...selectedSlugs, slug] : selectedSlugs.filter((s) => s !== slug)
+      const orderedNextSlugs = CATEGORIES.map((c) => c.slug).filter((s) => nextSlugs.includes(s))
+      navigate(`/category/${orderedNextSlugs.join(',')}?${searchParams.toString()}`)
+    },
+    offSlugsForChips: () => [],
+  }
+
+  const backToHomeParams = new URLSearchParams(searchParams)
+  backToHomeParams.delete('nocat')
+
   const [videos, setVideos] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -29,6 +45,7 @@ export default function CategoryPage() {
   const categoriesKey = categoryDbValues.join(',')
   const sportsKey = filters.sports.join(',')
   const nosubKey = filters.nosub.join(',')
+  const nochanKey = filters.nochan.join(',')
 
   useEffect(() => {
     let cancelled = false
@@ -52,10 +69,10 @@ export default function CategoryPage() {
       cancelled = true
     }
     // filters and categoryDbValues are new references every render; their individual
-    // fields are listed instead (categoriesKey/sportsKey/nosubKey stand in for the
-    // array fields).
+    // fields are listed instead (categoriesKey/sportsKey/nosubKey/nochanKey stand in
+    // for the array fields).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [categoriesKey, filters.metric, filters.comparison, filters.format, filters.date, filters.from, filters.to, sportsKey, nosubKey, filters.q])
+  }, [categoriesKey, filters.metric, filters.comparison, filters.format, filters.date, filters.from, filters.to, sportsKey, nosubKey, nochanKey, filters.q])
 
   const heading = selectedCategories.map((c) => c.displayName).join(' + ')
 
@@ -66,8 +83,11 @@ export default function CategoryPage() {
         <ThemeToggle />
       </div>
 
-      <FilterBar />
-      <CategoryPills selectedSlugs={selectedSlugs} otherParamsString={searchParams.toString()} />
+      <FilterBar categoryState={categoryState} />
+
+      <Link to={`/?${backToHomeParams.toString()}`} className="text-sm text-blue-600 dark:text-blue-400 hover:underline mb-4 inline-block">
+        &larr; Back to home
+      </Link>
 
       <h2 className="text-lg font-semibold mb-3">{heading}</h2>
 

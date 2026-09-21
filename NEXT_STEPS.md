@@ -6,14 +6,7 @@ Working document. Tick off what is done and add new questions as they come up.
 
 - [ ] **Does "last year" work as the default date filter?** Chosen provisionally. Check once real
       data is in the database whether it gives a good first impression.
-- [ ] **`"Incluencer Cycling"` is a typo in `data/channels_complete.xlsx`, column F.** Found while
-      building step 10's subcategory filter (2026-09-20): every other Influencer subcategory reads
-      "Influencer ___" (Running, Swimming, Triathlon); Cycling alone reads "Incluencer Cycling". The
-      front end now hardcodes this exact string in `frontend/src/lib/filters.js` because it must
-      match the database, which makes the misspelling visible in the subcategory filter's checkbox
-      label. Fixing it means the same kind of one-off spreadsheet edit as the triathlon-tagging fix
-      earlier (channels.subcategory in the DB, then the front end's hardcoded string, then a
-      re-import) — flagging rather than doing it, since the spreadsheet is read-only input.
+
 - [ ] **Is step 7d still needed now the project is on Pro?** On 2026-09-21 the database ran out of
       disk — a concurrent refresh of `videos_scored` failed with `DiskFull` — and the project was
       upgraded to Supabase Pro, with the disk then expanded manually, since upgrading alone does not
@@ -61,9 +54,10 @@ Working document. Tick off what is done and add new questions as they come up.
        **The refresh must use the direct database connection** (`psycopg`, `SUPABASE_DB_URL` in the
        root `.env`), not the `refresh_scoring_view()` RPC. Measured 2026-09-21: a concurrent refresh
        takes ~358 seconds, far past Supabase's gateway, which returns 504 and does not let it
-       complete. `ingestion/refresh_scoring_view.py` still uses the RPC route and needs rewriting
-       before step 6 relies on it. Set a session `statement_timeout` for the refresh; 30 minutes was
-       used.
+       complete. `ingestion/refresh_scoring_view.py --direct` implements this; remove its RPC mode
+       when building this step. Set a session `statement_timeout` for the refresh; 30 minutes was
+       used. Once the site is live, refresh concurrently, with an occasional plain refresh at a
+       quiet moment to compact the view (DECISIONS.md, 2026-09-21).
 7. [x] **Outlier Score, current baseline.** Compute the current baseline per channel, split by
        Shorts and long-form, for all three metrics (views, likes, comments) — `ingestion/
        compute_baselines.py`. Videos with null likes or comments are excluded from that metric's
@@ -200,13 +194,37 @@ Working document. Tick off what is done and add new questions as they come up.
          renders; Tailwind 4's `dark:` variant switched to class-based. Homepage sections are
          framed: a bordered container, a centred header bar, and "Show more" inside at the bottom.
          See DECISIONS.md, 2026-09-21.
-10c. [ ] **Channel filter.** Let users deselect individual channels — for example FloTrack, which
-         publishes ~99 long-form videos a month and crowds out other Influencers wherever that
-         category is shown. Store only the deselected channels in the URL, like `nosub`, and show
-         them as removable chips, so a filtered list never looks like a short one — the Cycling
-         Content Tracker's pattern. The front end cannot read `channels`, which is RLS-sealed, so
-         this needs a small read-only view of channel id, name, category and subcategory, granted
-         to `anon`. That view could also replace the subcategory list hardcoded in `filters.js`.         
+10c. [x] **Category, subcategory and channel filter.** Built as one hierarchical control rather than
+         a separate channel list: five dropdowns, one per category, identical on both routes, with
+         three-state checkboxes, a channel search, and a new `nochan` param. The category pills are
+         gone. The tree comes from a new view, `channels_public`, granted to `anon`, which retires
+         the hardcoded subcategory list. Prerequisite done first: the "Incluencer Cycling" typo fixed
+         in the spreadsheet, `filters.js` and the database (27 channels, 21,887 videos). Verified in
+         a real browser across six scenarios. See DECISIONS.md, 2026-09-21.     
+10d. [x] **Category-page timeouts fixed.** `videos_scored` compacted from 556 to 240 MB with a plain
+         refresh; the six plain sort indexes replaced by six format-first and six category-first
+         ones; merged rankings fetched one category at a time and merged in the browser. The failing
+         query went from 8,353 pages to 156 (about 250 ms cold), and a two-category merge from 4,204
+         pages and 5.3 seconds to 339 pages. Slowest remaining: Influencers at about 800 pages,
+         roughly 1.6 seconds cold — watch it as the archive grows. Selecting all four sports now
+         removes the `sports` param. See DECISIONS.md, 2026-09-21.
+10e. [x] **Card and filter-bar polish.** Warning triangle before the paid-promotion body line; sport
+         buttons all shown active by default, with a click switching one off and the last one
+         disabled; a tooltip on "still growing".
+10f. [ ] **Pagination on the category page: pages 1 to 4**, 60 videos each. Measure before building:
+         offset pagination makes page 4 walk about four times as far as page 1, and Influencers
+         already reads about 800 pages cold for page 1 — page 4 could reach about 3,000 pages, over
+         the 3-second limit. If so, use keyset pagination: each page continues after the last score
+         shown, so every page costs about the same as page 1. That needs a deterministic tie-breaker
+         (`video_id`), which reopens the tie-break decision of 2026-09-21, plus careful handling of
+         unscored videos at the end of a ranking. The rank helper already takes an offset.
+10g. [ ] **Video duration filter**, multi-select: under 1 min, 1–3, 3–20, 20–45, 45+ min, on
+         `duration_seconds`, which is already in the view. Rationale: paid ad videos are mostly under
+         a minute and almost always under three, so this gives users another way to exclude them.
+         Decide first: what the longer buckets mean under Shorts, which are all short; where the 54
+         videos with no duration go; and how the URL stores it, following the exclusion pattern.
+         Measure too: a narrow bucket, such as 45+ minutes on Brands, lengthens the index walk and
+         risks the timeouts step 10d fixed.           
 11. [ ] **Deploy to Vercel** and add the environment variables there.
 12. [ ] **GitHub Actions workflow.** Schedule the refresh script monthly, with the keys in GitHub
         Secrets, modelled on the Cycling Content Tracker's workflow. Trigger it manually once to

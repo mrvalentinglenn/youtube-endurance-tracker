@@ -1,15 +1,29 @@
 import { useSearchParams } from 'react-router-dom'
-import { CATEGORIES, resolveFilters } from '../lib/filters'
+import { CATEGORIES, resolveFilters, withParam } from '../lib/filters'
 import FilterBar from '../components/FilterBar'
-import HomeCategoryToggles from '../components/HomeCategoryToggles'
 import CategorySection from '../components/CategorySection'
 import ThemeToggle from '../components/ThemeToggle'
 
 export default function HomePage() {
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const filters = resolveFilters(searchParams)
 
   const visibleCategories = CATEGORIES.filter((c) => !filters.nocat.includes(c.slug))
+
+  // The homepage's category on/off lives in nocat (deselected slugs). This is the one
+  // interface FilterBar needs from the page: everything else it manages itself.
+  const categoryState = {
+    isOn: (slug) => !filters.nocat.includes(slug),
+    setOn: (slug, on) => {
+      setSearchParams((prev) => {
+        const currentNocat = resolveFilters(prev).nocat
+        const nextNocat = on ? currentNocat.filter((s) => s !== slug) : [...currentNocat, slug]
+        return withParam(prev, 'nocat', nextNocat)
+      })
+    },
+    offSlugsForChips: () => filters.nocat,
+    clearAllTransform: (params) => withParam(params, 'nocat', []),
+  }
 
   // nocat only means something on the homepage; "Show more" carries every other filter.
   const showMoreParams = new URLSearchParams(searchParams)
@@ -23,8 +37,7 @@ export default function HomePage() {
         <ThemeToggle />
       </div>
 
-      <FilterBar />
-      <HomeCategoryToggles />
+      <FilterBar categoryState={categoryState} />
 
       {visibleCategories.map((category) => (
         <CategorySection key={category.slug} category={category} filters={filters} showMoreSearch={showMoreSearch} />

@@ -18,29 +18,6 @@ export function categoryByDbValue(dbValue) {
   return CATEGORIES.find((c) => c.dbValue === dbValue)
 }
 
-// Static taxonomy from the spreadsheet (checked 2026-09-20: 22 distinct subcategory
-// names, none shared across categories, so the nosub exclusion key can be the bare
-// subcategory string). Hardcoded rather than queried at runtime -- it's fixed reference
-// data, and fetching it would mean scanning rows just to dedupe a 22-value list.
-// 'Incluencer Cycling' is spelled that way in the source data; kept as-is since the
-// front end must match the database exactly.
-export const SUBCATEGORIES = {
-  brands: [
-    'Bicycle Brand',
-    'Bike apparel /helmet brand',
-    'Bike components',
-    'Nutrition',
-    'Retailer',
-    'Running shoes /apparel brand',
-    'Swimgear/ Wetsuit Brand',
-    'Tech',
-  ],
-  influencers: ['Incluencer Cycling', 'Influencer Running', 'Influencer Swimming', 'Influencer Triathlon'],
-  athletes: ['pro cyclist', 'pro runner', 'pro swimmer', 'pro triathlete'],
-  teams: ['Pro Cycling Team', 'Running Team'],
-  organizers: ['Cycling Races', 'Running Races', 'Swimming Races', 'Triathlon Races'],
-}
-
 export const SPORTS = [
   { slug: 'swimming', column: 'is_swimming', displayName: 'Swimming' },
   { slug: 'cycling', column: 'is_cycling', displayName: 'Cycling' },
@@ -66,6 +43,7 @@ export const DEFAULT_FILTERS = {
   to: '',
   sports: [],
   nosub: [],
+  nochan: [],
   nocat: [],
   q: '',
 }
@@ -76,7 +54,6 @@ const VALID_FORMATS = ['longform', 'shorts']
 const VALID_DATES = DATE_OPTIONS.map((d) => d.value)
 const VALID_SPORT_SLUGS = SPORTS.map((s) => s.slug)
 const VALID_CATEGORY_SLUGS = CATEGORIES.map((c) => c.slug)
-const VALID_SUBCATEGORIES = new Set(Object.values(SUBCATEGORIES).flat())
 
 function parseCommaList(raw, allowed) {
   if (!raw) return []
@@ -104,7 +81,12 @@ export function resolveFilters(searchParams) {
     from: date === 'custom' ? searchParams.get('from') || '' : '',
     to: date === 'custom' ? searchParams.get('to') || '' : '',
     sports: parseCommaList(searchParams.get('sports'), VALID_SPORT_SLUGS),
-    nosub: parseCommaList(searchParams.get('nosub'), VALID_SUBCATEGORIES),
+    // nosub and nochan have no allow-list: subcategories and channel IDs now come from
+    // a fetch (channels_public), not a hardcoded list, and resolveFilters runs
+    // synchronously before that fetch can complete. A stale or invalid entry simply
+    // matches nothing in the fetched tree and is inert -- same as a dead nochan ID.
+    nosub: parseCommaList(searchParams.get('nosub')),
+    nochan: parseCommaList(searchParams.get('nochan')),
     nocat: parseCommaList(searchParams.get('nocat'), VALID_CATEGORY_SLUGS),
     q: searchParams.get('q') || '',
   }

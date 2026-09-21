@@ -93,7 +93,6 @@ in one decisive step.
   the public URL of the channel's logo in the Supabase Storage bucket `channel-avatars`, written by
   `ingestion/sync_avatars.py`. The bucket is not a SQL object: a rebuilt project needs it created by
   hand, or the site comes up with no avatars and no error.
-  is_triathlon, uploads_playlist_id, subscriber_count, last_checked_at
 - `videos` — video_id (PK), channel_id (FK), title, description, published_at, duration_seconds,
   is_short, thumbnail_url. `duration_seconds` and `is_short` are both nullable. `is_short` NULL
   means the Shorts check has not succeeded yet, which is distinct from false: such videos are
@@ -117,11 +116,27 @@ in one decisive step.
   divisions. The logic lives here and nowhere else.
 - `videos_scored` — a materialised view over `videos_scored_live`, carrying the indexes, and the
   only object the front end reads. It keeps the name the front end already uses, so the read
-  contract is unchanged. Refreshed by the ingestion run, never by the front end. Ten indexes: unique
-  on `video_id` (required by `REFRESH ... CONCURRENTLY`), one per sort column written
-  `desc nulls last` to match the front end's `nullsFirst: false`, plus `published_at`, `is_short`,
-  and a GIN index on `fts`. SELECT is granted to `anon` for the front end and to `service_role` so
-  ingestion scripts can verify what the app sees.
+  contract is unchanged. Refreshed by the ingestion run, never by the front end. SELECT is granted
+  to `anon` for the front end and to `service_role` so ingestion scripts can verify what the app
+  sees. Sixteen indexes:
+  - unique on `video_id`, required by `REFRESH ... CONCURRENTLY`;
+  - `published_at`, `is_short`, and a GIN index on `fts` for keyword search;
+  - six **category-first** indexes, `(category, is_short, <col> desc nulls last)`, one per sort
+    column. Every query the app sends reads one of these in final order: a single-category ranking
+    touches about 150 pages instead of about 8,000.
+  - six **format-first** indexes, `(is_short, <col> desc nulls last)`. No current query needs them,
+    since merged rankings are fetched per category; they are kept as a cheap fallback, about 12 MB,
+    for any future query without a single-category condition.
+  The sort columns are `views`, `likes`, `comments`, `score_views`, `score_likes` and
+  `score_comments`. `desc nulls last` is written into every definition to match the front end's
+  `nullsFirst: false`; without the match, Postgres sorts on top of the index. There are deliberately
+  no plain single-column sort indexes: every query filters on `is_short`, so they only ever did the
+  same work with twice the walk.
+- `channels_public` — a plain view over `channels` exposing `channel_id`, `name`, `category`,
+  `subcategory` and the four sport flags, granted to `anon`. It feeds the category filter's tree, so
+  the subcategory taxonomy comes from data rather than code. 342 rows, so it is not materialised and
+  needs no refresh: it always shows the current table. Like the scoring views, it runs with its
+  owner's permissions, which is what lets `anon` read it while `channels` itself stays sealed.  
 - A video's current value for a metric is always the most recent `video_stats` row for that video,
   read on demand. `videos` deliberately holds no denormalised `latest_views` columns: a derived
   copy can silently disagree with the source, and a score computed from a stale number is
@@ -166,7 +181,7 @@ writes `description` truncates on write — the backfill, the refresh, and anyth
 Descriptions are front-loaded: the median is 535 characters, and the long tail is mostly sponsor
 links, timestamps and social handles that bloat the search index without helping anyone search.
 Existing rows are truncated in step 7d, which is under review since the Pro upgrade — see
-NEXT_STEPS.md. See DECISIONS.md, 2026-09-21. The front-end keyword search
+NEXT_STEPS.md. See DECISIONS.md, 2026-09-21. The front-end keyword search runs over titelplus
 plus description, using Postgres full-text search with the `'simple'` configuration: no stemming,
 no stopword removal. The channel set is multilingual, so a language-specific stemmer would apply
 one language's rules to all of them. Any script that rebuilds the `fts` column must use the same
@@ -223,10 +238,13 @@ view does only the division: current value over stored baseline.
 
 **Two baselines, depending on the age of the video.**
 
-*Mature videos (older than 180 days) use an era baseline.* The median all-time value of the selected metric of the
-channel's videos published in a window centred on the video: 6 months before to 6 months after its
-publication date. If that window holds fewer than 10 mature videos of the same format, widen to 12
-months before and after. If it is still under 10, the fallback below applies.
+*Mature videos (older than 180 days) use an era baseline.* The median all-time value of the selected
+metric of the channel's mature videos published in a window centred on the video: 6 months before
+to 6 months after its publication date. Within that window, take up to the 10 nearest videos
+published before it and the 10 nearest published after it, by publication date. If one side has
+fewer than 10, fill the remaining places with the next-nearest from the other side, up to 20 in
+total. If the window holds fewer than 10 in all, widen to 12 months either side and repeat. If it is
+still under 10, the fallback below applies.
 
 *Young videos (180 days or younger) use the current baseline.* The median all-time value of the selected metric of the
 channel's videos published between 180 days and 24 months ago. Minimum 10 videos of the same
@@ -308,13 +326,10 @@ Content Tracker. Time is controlled entirely through the publication-date filter
 category's top videos under the current filters. `/category/:categories` shows a single merged
 ranking of 60 videos across one or more categories, given as a comma-separated list of slugs —
 `brands`, `influencers`, `athletes`, `teams`, `organizers` — e.g. `/category/brands,teams`. Its
-heading names the selection, and a row of category pills with a "Back to home" link toggles
-membership. A "Show more" button inside each homepage section navigates to that category's page,
-carrying the current filters.
-Each homepage section is a bordered container with a header bar across the top holding the
-category name, centred, on a subtly raised background; then the cards; then the "Show more" button
-centred at the bottom, inside the container, so it visibly belongs to its section. No bright fill on
-the header — the border and the structure do the separating.
+heading names the selection, and a plain "Back to home" link sits above the results. Which
+categories it covers is set with the same category filter as the homepage, described below. A
+"Show more" button inside each homepage section navigates to that category's page, carrying the
+current filters.
 
 **Section order is fixed:** Brands, Influencers, Professional Athletes, Professional Teams, Race
 Organizers. A product decision, not alphabetical and not by size.
@@ -330,22 +345,15 @@ Filters the user can combine:
 1. Metric: views, likes or comments. Default: views.
 2. Comparison: absolute or relative. Default: absolute.
 3. Keyword search over title + description
-4. Category (multi-select). On the homepage it decides which sections appear: all are selected by
-   default, and deselecting one removes its section. On a category page it decides which categories
-   are merged into the ranked list. The last remaining category cannot be deselected, so neither
-   page can reach zero results — an empty page reads as broken rather than as filtered.
-5. Subcategory (multi-select). Filters which videos appear inside the sections, never which sections
-   exist. Subcategories are per category in the data (`Brand > Nutrition`, `Race Organizer >
-   Running Races`), so the control is grouped by category: deselecting `Brand > Nutrition` must not
-   affect anything under another category.
-6. Sport: swimming, cycling, running, triathlon (multi-select). Global — one set of toggles
+4. Category, subcategory and channel — one hierarchical filter. See **The category filter** below.
+5. Sport: swimming, cycling, running, triathlon (multi-select). Global — one set of toggles
    applying to every section, not per category. A channel is shown if it carries **at least one**
    selected sport. So deselecting cycling still shows a helmet brand tagged both cycling and
-   triathlon, and removes a channel tagged cycling alone.
-7. Publication date: last 6 months, last year, last 2 years, last 3 years, all time, or a custom
+   triathlon, and removes a channel tagged cycling alone. In the category filter, channels carrying none of the selected sports are dimmed, not hidden.
+6. Publication date: last 6 months, last year, last 2 years, last 3 years, all time, or a custom
    period. "All time" means no date restriction on the query: everything in the database.
    Default on opening the app: last year.
-8. Format: Shorts or long-form. This is a required choice, not an optional filter — the two formats
+7. Format: Shorts or long-form. This is a required choice, not an optional filter — the two formats
    are never mixed in one grid, because their thumbnails have different aspect ratios and their view
    scales are not comparable. Default: long-form.
 
@@ -363,8 +371,57 @@ Metric and Comparison together decide the sort order:
 Absolute answers "what got the most attention in this sector"; relative answers "what punched above
 its weight". Large channels dominate the first, small channels surface in the second.
 
-Absolute answers "what got the most attention in this sector"; relative answers "what punched above
-its weight". Large channels dominate the first, small channels surface in the second.
+
+
+**Filter state lives in the URL** as query params, never in React state, so a refresh keeps the
+filters, the back button steps back one change, and a link carries its filters to someone else.
+`DEFAULT_FILTERS` and one resolver, `resolveFilters`, live in `frontend/src/lib/filters.js`, and
+both routes use them; defaults appear nowhere else. A control set back to its default removes its
+param — selecting all four sports, for instance, removes `sports` entirely rather than listing all
+four.
+
+Params: `metric`, `comparison`, `format`, `date` (with `from` and `to` when `date=custom`),
+`sports`, `q`, and three that store only what is switched off, each at the level the user switched
+it off:
+
+- `nocat` — deselected categories, on the homepage only. On the category page the path holds the
+  category selection instead. Each page keeps its own, so "Show more" on Brands opens a Brands-only
+  page and going back still shows every section.
+- `nosub` — deselected subcategories.
+- `nochan` — individually deselected channel IDs. IDs, never names: names change when a team's
+  sponsor does, and a bookmarked link must not silently stop working.
+
+Storing each exclusion at its own level means excluding the Nutrition subcategory also excludes a
+nutrition brand added next month. Checkbox states are always derived from these params, never
+stored. When the user re-ticks one channel inside an excluded subcategory, the subcategory leaves
+`nosub` and its other channels join `nochan`. An exclusion under a switched-off category is inert
+until that category comes back. A `nochan` ID no longer in `channels_public` is ignored.
+
+Search is debounced and commits with `replace`, so the back button does not step through fragments
+of a word; clearing it and every other control use `push`. "Show more" and "Back to home" carry
+every param except `nocat`.
+
+**The category filter.** Five dropdown buttons in the filter bar, one per category in the fixed
+section order, identical on both routes. Inside each: a checkbox for the whole category, a search
+box matching channel names, and the category's subcategories as collapsible groups, each with its
+own checkbox and its channels listed by name, each with a checkbox. No avatars. The tree is built
+from `channels_public`.
+
+- Category and subcategory checkboxes have three states: on, off, or partly filled when some of
+  what sits below them is off. Clicking a partial box turns everything below it back on.
+- Subcategory groups start collapsed — Brands alone has 170 channels — except a group containing a
+  switched-off channel, which opens so the exclusion is visible. A search match opens its group.
+- Each button shows the control's own state, e.g. "Brands · 165 of 170". Channels dimmed by the
+  sport filter still count: the button describes this control, and the dimming shows another.
+- Removable chips below the filter bar list every stored exclusion at its own level —
+  "Brands › Nutrition ✕", "FloTrack ✕" — with "Clear all" from two chips up.
+- The last category still on cannot be switched off, on either route: its checkbox is disabled.
+  Zero categories is a blank page, which reads as broken rather than filtered.
+- One piece of state holds which dropdown is open. Five panels able to open at once is where this
+  breaks.
+- If `channels_public` cannot be fetched, the dropdowns show an error but videos still load, and
+  chips fall back to raw subcategory strings and channel IDs rather than disappearing. An active
+  exclusion must never become invisible.
 
 Each video card shows: thumbnail, title, channel's avatar and name, **publication date**, views, likes and
 comments. Under Relative it also shows the Outlier Score for the selected metric; under Absolute
@@ -420,6 +477,19 @@ section stays roughly as tall as a long-form one.
 **The front end reads `videos_scored` and never computes a score.** It is a materialised view, so
 reads are fast regardless of cache state, and the scoring logic can change in SQL with no front-end
 work.
+
+**Merged rankings are fetched one category at a time.** When the category page covers more than one
+category, it sends one query per category, in parallel, each with identical filters, sort and a
+limit of 60, then merges them in the browser and keeps the first 60. The result is identical to one
+query across all of them — any video in the combined top 60 is in its own category's top 60 — but
+each query reads its category-first index instead of walking past every other category. Measured
+cold, a two-category merge fell from 4,204 pages and 5.3 seconds to 339 pages. The slowest single
+category is Influencers at about 800 pages, roughly 1.6 seconds fully cold: the one to watch as the
+archive grows.
+
+The browser's merge must sort exactly as the database does — descending, NULLs last — so under
+Relative an unscored video never sits above a scored one. If any one category's query fails, the
+whole ranking shows the error: a ranking missing a category would look complete and be wrong.
 
 **The card never carries a fixed width.** It is `w-full` and takes the width its grid cell gives it,
 deriving height from aspect-ratio classes. The Cycling Content Tracker lost a session to this: a
@@ -486,10 +556,17 @@ dark treatment, not only the background.
   the SQL editor or an RPC. Both sit behind Supabase's web gateway, which cuts requests off: the
   editor returns "upstream timeout" and RPCs return 504. A concurrent refresh of `videos_scored`
   takes about six minutes, so it can only run directly. Set a session `statement_timeout` for such
-  work.
-- Dropping and recreating `videos_scored` drops its indexes and its grants with it. Recreate all ten
+  work. `ingestion/refresh_scoring_view.py --direct` does this for the refresh; its RPC mode fails on this
+  database and is to be removed.
+- Dropping and recreating `videos_scored` drops its indexes and its grants with it. Recreate all sixteen
   indexes and reissue SELECT to `anon` and `service_role`, then verify before moving on.
 - `information_schema` does not describe materialised views: it reports no columns and no grants for
   them even when both exist. Check them in the catalog instead — `pg_attribute` for columns,
   `pg_class.relacl` for grants, where `anon=r` means SELECT.
-
+- A concurrent refresh keeps the site readable while it runs, but leaves bloat: it writes changed
+  rows as new versions and leaves the old ones behind. Two concurrent refreshes took `videos_scored`
+  from 244 MB to 556 MB, and bloat means more pages to read on every query. A plain `REFRESH`
+  rebuilds the view compactly — 556 back to 240 MB — but blocks reads while it runs. So: plain
+  refreshes while there are no visitors; once the site is live, concurrent refreshes, with an
+  occasional plain one at a quiet moment to compact. Every refresh rebuilds all rows however little
+  changed, about three to six minutes, so batch data fixes into a single refresh.

@@ -1,11 +1,15 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { CATEGORIES, DATE_OPTIONS, SPORTS, SUBCATEGORIES, resolveFilters, withParam } from '../lib/filters'
+import { DATE_OPTIONS, SPORTS, categoryBySlug, resolveFilters, withParam } from '../lib/filters'
+import { useChannelTree } from '../lib/channelTree'
+import ChannelFilterDropdowns from './ChannelFilterDropdowns'
+import ExclusionChips from './ExclusionChips'
 
 const METRICS = ['views', 'likes', 'comments']
 const COMPARISONS = ['absolute', 'relative']
 const FORMATS = ['longform', 'shorts']
 const SEARCH_DEBOUNCE_MS = 400
+const ALL_SPORT_SLUGS = SPORTS.map((s) => s.slug)
 
 function label(word) {
   return word[0].toUpperCase() + word.slice(1)
@@ -33,15 +37,35 @@ function ToggleGroup({ options, value, onChange, renderLabel }) {
   )
 }
 
-// Self-contained: reads and writes the URL directly via useSearchParams, so both routes
-// can render <FilterBar /> with no props. Filter state lives in the URL, not React state
-// -- a refresh, a back-button step, or a pasted link all reproduce the same page.
-export default function FilterBar() {
+// Reads and writes the URL directly via useSearchParams for everything except category
+// on/off, which is genuinely page-specific (nocat on the homepage, the path on the
+// category page) -- categoryState is the one thing each page still has to supply.
+export default function FilterBar({ categoryState }) {
   const [searchParams, setSearchParams] = useSearchParams()
   const filters = resolveFilters(searchParams)
+  const { status: treeStatus, tree } = useChannelTree()
 
   function setFilter(key, value, { replace = false } = {}) {
     setSearchParams((prev) => withParam(prev, key, value), { replace })
+  }
+
+  // nosub and nochan are set together, in one navigation, by every transition in
+  // channelFilterState.js -- two separate setSearchParams calls in the same handler
+  // would risk one clobbering the other's stale snapshot of the URL.
+  function setNosubNochan(nextNosub, nextNochan) {
+    setSearchParams((prev) => {
+      let next = withParam(prev, 'nosub', nextNosub)
+      next = withParam(next, 'nochan', nextNochan)
+      return next
+    })
+  }
+
+  function handleClearAllExclusions() {
+    setSearchParams((prev) => {
+      let next = withParam(prev, 'nosub', [])
+      next = withParam(next, 'nochan', [])
+      return categoryState.clearAllTransform ? categoryState.clearAllTransform(next) : next
+    })
   }
 
   function handleDateChange(value) {
@@ -55,9 +79,23 @@ export default function FilterBar() {
     })
   }
 
-  function toggleInList(key, current, item) {
-    const next = current.includes(item) ? current.filter((v) => v !== item) : [...current, item]
-    setFilter(key, next)
+  // Sports are stored as "which are selected", but displayed and clicked as "which are
+  // active", where the empty (default) list displays as all four active -- so the
+  // active set for display/toggling purposes is never the raw stored list itself.
+  const activeSports = filters.sports.length === 0 ? ALL_SPORT_SLUGS : filters.sports
+
+  // Toggling a sport is relative to the active set, not the stored one: from the
+  // default (nothing stored, all four active), clicking cycling stores the other
+  // three, not just cycling. If a toggle would result in every sport active again,
+  // it collapses back to [] -- "all four selected" is the same query as none
+  // selected (fetchVideos only adds the OR clause when sports.length > 0), so
+  // CLAUDE.md's "a control back at its default removes its param" applies to this
+  // semantic default too, not just the literal empty-array one withParam handles.
+  function toggleSport(slug) {
+    const isActive = activeSports.includes(slug)
+    const nextActive = isActive ? activeSports.filter((s) => s !== slug) : [...activeSports, slug]
+    const normalized = nextActive.length === ALL_SPORT_SLUGS.length ? [] : nextActive
+    setFilter('sports', normalized)
   }
 
   // Local buffer for the search box: committed to the URL debounced, with replace so
@@ -137,52 +175,53 @@ export default function FilterBar() {
 
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-sm text-gray-700 dark:text-gray-300">Sport</span>
-        {SPORTS.map((sport) => (
-          <button
-            key={sport.slug}
-            type="button"
-            onClick={() => toggleInList('sports', filters.sports, sport.slug)}
-            aria-pressed={filters.sports.includes(sport.slug)}
-            className={`px-3 py-1 rounded border text-sm ${
-              filters.sports.includes(sport.slug)
-                ? 'bg-gray-900 text-white border-gray-900 dark:bg-gray-100 dark:text-gray-900 dark:border-gray-100'
-                : 'border-gray-300 text-gray-700 dark:border-gray-700 dark:text-gray-300'
-            }`}
-          >
-            {sport.displayName}
-          </button>
-        ))}
-        {filters.sports.length === 0 && (
-          <span className="text-xs text-gray-400 dark:text-gray-500">(none selected = all sports)</span>
-        )}
+        {SPORTS.map((sport) => {
+          const isActive = activeSports.includes(sport.slug)
+          const isLastActive = isActive && activeSports.length === 1
+          return (
+            <button
+              key={sport.slug}
+              type="button"
+              onClick={() => toggleSport(sport.slug)}
+              disabled={isLastActive}
+              aria-pressed={isActive}
+              title={isLastActive ? 'At least one sport must stay selected' : undefined}
+              className={`px-3 py-1 rounded border text-sm ${
+                isActive
+                  ? 'bg-gray-900 text-white border-gray-900 dark:bg-gray-100 dark:text-gray-900 dark:border-gray-100'
+                  : 'border-gray-300 text-gray-700 dark:border-gray-700 dark:text-gray-300'
+              } ${isLastActive ? 'opacity-60 cursor-not-allowed' : ''}`}
+            >
+              {sport.displayName}
+            </button>
+          )
+        })}
       </div>
 
       <div>
-        <span className="text-sm text-gray-700 dark:text-gray-300 block mb-1">Subcategory</span>
-        <div className="flex flex-wrap gap-2">
-          {CATEGORIES.map((category) => (
-            <details key={category.slug} className="border border-gray-200 dark:border-gray-700 rounded px-2 py-1">
-              <summary className="text-sm cursor-pointer select-none text-gray-900 dark:text-gray-100">
-                {category.displayName}
-              </summary>
-              <div className="pt-2 space-y-1">
-                {SUBCATEGORIES[category.slug].map((subcategory) => (
-                  <label
-                    key={subcategory}
-                    className="flex items-center gap-2 text-sm whitespace-nowrap text-gray-800 dark:text-gray-200"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={!filters.nosub.includes(subcategory)}
-                      onChange={() => toggleInList('nosub', filters.nosub, subcategory)}
-                    />
-                    {subcategory}
-                  </label>
-                ))}
-              </div>
-            </details>
-          ))}
-        </div>
+        <span className="text-sm text-gray-700 dark:text-gray-300 block mb-1">Category / subcategory / channel</span>
+        <ChannelFilterDropdowns
+          status={treeStatus}
+          tree={tree}
+          nosub={filters.nosub}
+          nochan={filters.nochan}
+          sports={filters.sports}
+          categoryState={categoryState}
+          onSetNosubNochan={setNosubNochan}
+        />
+        <ExclusionChips
+          extraChips={categoryState.offSlugsForChips().map((slug) => ({
+            key: `nocat:${slug}`,
+            label: `${categoryBySlug(slug).displayName} (off)`,
+            onRemove: () => categoryState.setOn(slug, true),
+          }))}
+          nosub={filters.nosub}
+          nochan={filters.nochan}
+          tree={tree}
+          onRemoveNosub={(name) => setNosubNochan(filters.nosub.filter((s) => s !== name), filters.nochan)}
+          onRemoveNochan={(id) => setNosubNochan(filters.nosub, filters.nochan.filter((c) => c !== id))}
+          onClearAll={handleClearAllExclusions}
+        />
       </div>
 
       <div className="flex items-center gap-2">

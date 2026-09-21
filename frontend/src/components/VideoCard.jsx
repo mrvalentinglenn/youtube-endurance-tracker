@@ -8,6 +8,8 @@ const PROMOTION_TOOLTIP =
   'Extreme outlier scores may indicate this video was used for paid advertising.'
 const PROMOTION_BODY_LINE =
   'Metrics on this video may reflect paid advertising rather than organic reach.'
+const STILL_GROWING_TOOLTIP =
+  'Published in the last six months — its views, comments and likes may still grow significantly.'
 
 function isPromotionFlagged(video) {
   // Reads all three score columns, not just the displayed metric: the flag is a property
@@ -77,11 +79,12 @@ function HeartIcon() {
   )
 }
 
-// Standard hazard-sign shape: triangle outline, exclamation mark inside. White on a
-// solid red or purple badge, so its contrast never depends on the page theme.
-function WarningTriangleIcon() {
+// Standard hazard-sign shape: triangle outline, exclamation mark inside. Colourless
+// (currentColor) so it takes whatever colour its container sets -- white on the score
+// badge, red next to the body line -- and stays legible regardless of the page theme.
+function WarningTriangleIcon({ className = 'w-3.5 h-3.5' }) {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" className="w-3.5 h-3.5">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" className={className}>
       <path d="M12 3.5 2.3 20.5h19.4L12 3.5z" strokeLinecap="round" />
       <line x1="12" y1="10" x2="12" y2="14.5" strokeLinecap="round" />
       <circle cx="12" cy="17.3" r="0.9" fill="currentColor" stroke="none" />
@@ -128,7 +131,10 @@ export default function VideoCard({ video, metric, comparison, rank, isShort }) 
         )}
 
         {video.is_still_growing && (
-          <div className="absolute top-2 right-2 rounded px-1.5 py-0.5 text-xs font-semibold text-white bg-orange-500">
+          <div
+            className="absolute top-2 right-2 rounded px-1.5 py-0.5 text-xs font-semibold text-white bg-orange-500"
+            title={STILL_GROWING_TOOLTIP}
+          >
             still growing
           </div>
         )}
@@ -168,7 +174,12 @@ export default function VideoCard({ video, metric, comparison, rank, isShort }) 
           </span>
         </div>
 
-        {flagged && <p className="text-xs text-red-600 dark:text-red-400 pt-1">{PROMOTION_BODY_LINE}</p>}
+        {flagged && (
+          <p className="text-xs text-red-600 dark:text-red-400 pt-1 flex items-start gap-1">
+            <WarningTriangleIcon className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            {PROMOTION_BODY_LINE}
+          </p>
+        )}
       </div>
     </a>
   )

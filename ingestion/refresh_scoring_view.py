@@ -1,49 +1,62 @@
-"""Refreshes the videos_scored materialised view via the refresh_scoring_view() RPC (see
-DECISIONS.md, 2026-09-20, "Refreshing videos_scored needs a database function and two
-raised timeouts"). Small and reusable on purpose -- step 6's refresh script needs exactly
-this call as its final step, after its own checks pass.
+"""Refreshes the videos_scored materialised view, verifying against the database rather
+than trusting the call's own response either way.
 
-The refresh takes over a minute on 98,300 rows. The default Supabase/httpx client read
-timeout (~60s) raises httpx.ReadTimeout on a refresh that actually succeeds server-side --
-Postgres keeps running the REFRESH regardless of whether the client is still listening.
-So this script builds its own client with a long read timeout instead of using the shared
-one from config.py, and it does not treat a timeout on the RPC call itself as failure --
-only a verification query afterwards decides that.
+Two paths:
 
-Verification, not trust: after the call returns (or times out client-side), this queries
-videos_scored for one or more sentinel videos and confirms their stored values (e.g.
-score_views) reflect what's currently in videos.baseline_views -- not just that the RPC
-call returned without raising.
+--direct (recommended on this database, see below) opens a real Postgres session via
+psycopg and SUPABASE_DB_URL (the session pooler, not the transaction one -- SET
+statement_timeout needs to survive for the following statement, which a transaction-mode
+pooler cannot guarantee), sets statement_timeout explicitly, and runs
+`REFRESH MATERIALIZED VIEW CONCURRENTLY public.videos_scored` directly. No REST/RPC
+gateway in the path at all.
+
+The default path calls the refresh_scoring_view() RPC (DECISIONS.md, 2026-09-20,
+"Refreshing videos_scored needs a database function and two raised timeouts") through the
+Supabase client. This was the original design -- the client has no other way to run DDL
+-- but proved unreliable once nearly every row's baseline changed at once (2026-09-21):
+Supabase's own gateway in front of PostgREST returns a 504 "upstream request timeout" on
+a refresh this large, independent of any timeout set on this end (raising this script's
+own client timeout does nothing, since the gateway is what's cutting the connection, not
+this client), and confirmed by a 15-minute wait that the refresh had NOT completed
+server-side either. --direct exists because of that -- prefer it.
+
+Verification, not trust: after either path, this queries videos_scored for one or more
+sentinel videos and confirms their stored values (e.g. score_views) reflect what's
+currently in videos.baseline_views -- not just that the call returned without raising.
 
 videos_scored is granted to anon only (DECISIONS.md, 2026-09-20, step 7b: "the only
 object the front end reads"), deliberately -- service_role, which every other ingestion
-script uses, has no SELECT grant on it at all. Discovered here: the secret-key client
-gets `permission denied for materialized view videos_scored`. Rather than widen that
-grant (a schema change this script has no business making on its own), verification
-reads through a second client built with the front end's own publishable key, from
-frontend/.env -- the same credential and the same read path the site itself uses, so a
-successful verification here means the site would see it too.
+script uses, has no SELECT grant on it at all (confirmed: the secret-key client gets
+`permission denied for materialized view videos_scored`). Rather than widen that grant (a
+schema change this script has no business making on its own), verification reads through
+a second client built with the front end's own publishable key, from frontend/.env -- the
+same credential and the same read path the site itself uses, so a successful
+verification here means the site would see it too.
 
 Usage:
-    python refresh_scoring_view.py [--sentinel VIDEO_ID ...]
+    python refresh_scoring_view.py --direct [--sentinel VIDEO_ID ...]
+    python refresh_scoring_view.py [--sentinel VIDEO_ID ...]   # the RPC path
 """
 
 import argparse
 import re
 import sys
+import time
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 import httpx
+import psycopg
 from postgrest.exceptions import APIError
 from supabase import create_client
 from supabase.client import ClientOptions
 
-from config import SUPABASE_SECRET_KEY, SUPABASE_URL, supabase
+from config import SUPABASE_DB_URL, SUPABASE_SECRET_KEY, SUPABASE_URL, supabase
 
-REFRESH_READ_TIMEOUT_SECONDS = 600  # 10 minutes; the refresh itself measured over a minute
+REFRESH_READ_TIMEOUT_SECONDS = 600  # 10 minutes; used by the RPC path's client
+DIRECT_STATEMENT_TIMEOUT_MINUTES = 30  # used by --direct's session
 FRONTEND_ENV_PATH = Path(__file__).resolve().parent.parent / "frontend" / ".env"
 
 
@@ -67,6 +80,30 @@ def build_anon_client():
     if not url_match or not key_match:
         raise RuntimeError(f"Can't verify: {FRONTEND_ENV_PATH} is missing VITE_SUPABASE_URL or VITE_SUPABASE_PUBLISHABLE_KEY.")
     return create_client(url_match.group(1).strip(), key_match.group(1).strip())
+
+
+def call_refresh_direct(timeout_minutes):
+    """Opens its own psycopg connection -- no REST/RPC gateway in the path, so the 504
+    seen on the RPC path can't happen here. autocommit=True: SET statement_timeout must
+    apply to the session before the REFRESH runs, not be scoped to (and rolled back
+    with) a transaction."""
+    if not SUPABASE_DB_URL:
+        raise RuntimeError("SUPABASE_DB_URL is not set (check the root .env) -- required for --direct.")
+
+    print(f"Connecting directly to Postgres (session pooler)...", flush=True)
+    with psycopg.connect(SUPABASE_DB_URL, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SET statement_timeout = '{timeout_minutes}min'")
+            print(
+                f"statement_timeout set to {timeout_minutes} minutes. Running "
+                f"REFRESH MATERIALIZED VIEW CONCURRENTLY public.videos_scored -- "
+                f"this measured ~6 minutes on this run's diff, waiting for it to finish...",
+                flush=True,
+            )
+            start = time.monotonic()
+            cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY public.videos_scored")
+            elapsed = time.monotonic() - start
+            print(f"REFRESH completed in {elapsed:.1f}s.")
 
 
 def call_refresh():
@@ -130,12 +167,24 @@ def verify_sentinel(anon_client, video_id):
 def parse_args():
     parser = argparse.ArgumentParser(description="Refreshes videos_scored and verifies it against videos.")
     parser.add_argument(
+        "--direct",
+        action="store_true",
+        help="Use a direct psycopg connection (SUPABASE_DB_URL) instead of the refresh_scoring_view() "
+             "RPC. Recommended: the RPC path 504s on a large refresh. See module docstring.",
+    )
+    parser.add_argument(
+        "--timeout-minutes",
+        type=int,
+        default=DIRECT_STATEMENT_TIMEOUT_MINUTES,
+        help=f"--direct only: statement_timeout for the session, in minutes (default {DIRECT_STATEMENT_TIMEOUT_MINUTES}).",
+    )
+    parser.add_argument(
         "--sentinel",
         action="append",
         default=[],
         metavar="VIDEO_ID",
         help="A video_id to verify after the refresh (repeatable). Its videos_scored row is "
-             "checked against the current videos.baseline_views, not just the RPC's own response.",
+             "checked against the current videos.baseline_views, not just the call's own response.",
     )
     return parser.parse_args()
 
@@ -143,7 +192,10 @@ def parse_args():
 def main():
     args = parse_args()
 
-    call_refresh()
+    if args.direct:
+        call_refresh_direct(args.timeout_minutes)
+    else:
+        call_refresh()
 
     if not args.sentinel:
         print("No --sentinel given -- nothing verified. Pass one or more --sentinel VIDEO_ID.")
