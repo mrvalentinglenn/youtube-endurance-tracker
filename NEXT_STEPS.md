@@ -211,13 +211,17 @@ Working document. Tick off what is done and add new questions as they come up.
 10e. [x] **Card and filter-bar polish.** Warning triangle before the paid-promotion body line; sport
          buttons all shown active by default, with a click switching one off and the last one
          disabled; a tooltip on "still growing".
-10f. [ ] **Pagination on the category page: pages 1 to 4**, 60 videos each. Measure before building:
-         offset pagination makes page 4 walk about four times as far as page 1, and Influencers
-         already reads about 800 pages cold for page 1 — page 4 could reach about 3,000 pages, over
-         the 3-second limit. If so, use keyset pagination: each page continues after the last score
-         shown, so every page costs about the same as page 1. That needs a deterministic tie-breaker
-         (`video_id`), which reopens the tie-break decision of 2026-09-21, plus careful handling of
-         unscored videos at the end of a ranking. The rank helper already takes an offset.
+10f. [ ] **Pagination on the category page: pages 1 to 4**, 60 videos each. Measured 2026-09-21 at
+         default filters: plain offset pagination is fast enough. Worst case, Influencers, Absolute,
+         page 4, reads 965 pages — about 1.9 seconds fully cold, 64% of the 3-second limit. Merged
+         categories run per category in parallel, so a merge costs its slowest category, not the sum.
+         Absolute is consistently 2 to 2.5 times the cost of Relative at the same depth. Caveat
+         before calling it done: these were default filters. Narrowing filters lengthen the walk —
+         the ~800 pages recorded for Influencers came from a narrower combination, against 76 at
+         defaults — and page 4 multiplies whatever the filters cost. Build offset pagination, then
+         measure one deliberately narrow combination at page 4, Absolute. If that exceeds the limit,
+         switch to keyset pagination: each page continues after the last value shown, so every page
+         costs about what page 1 does.
 10g. [ ] **Video duration filter**, multi-select: under 1 min, 1–3, 3–20, 20–45, 45+ min, on
          `duration_seconds`, which is already in the view. Rationale: paid ad videos are mostly under
          a minute and almost always under three, so this gives users another way to exclude them.
