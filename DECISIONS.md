@@ -1113,6 +1113,10 @@ the refresh path.
 plan's limit; on Pro it is under review — see NEXT_STEPS.md. Its execution note is also out of
 date: the direct database connection it needs now exists.
 
+**Amended 2026-09-22** by "Step 7d carried out on Pro". Both changes were carried out as decided;
+the reason changed from staying under the free limit to keeping refreshes small and the free plan
+possible. The execution note's concern is resolved: it ran over the direct connection.
+
 **Decision.** Two changes to stay under the Free Plan's 0.5 GB per-project database limit.
 Descriptions are stored truncated to their first 500 characters, on every write. And `fts` is
 stored once, inside the materialised view, rather than both there and on `videos`. Decided
@@ -1342,6 +1346,10 @@ networks and some runners lack. The Session pooler works over IPv4.
 
 ## 2026-09-21 — Upgraded to Supabase Pro
 
+**Amended 2026-09-22** by "Step 7d carried out on Pro". The truncation and `fts` decision is no
+longer under review: it was carried out. Whether to return to the free plan is decided after a few
+monthly runs.
+
 **Decision.** The project moved to the Pro plan, and its disk was expanded manually.
 
 **Why.** The free plan's limit had already been passed, but what forced it was the disk physically
@@ -1523,3 +1531,50 @@ single-query paths can pick different ones. The database never guaranteed an ord
 single query only looked stable because it always walked the same index. Making ties deterministic
 would mean adding `video_id` to all twelve sort indexes and rebuilding them — real work for an
 effect visible only in a nearly empty ranking. Left as it is.
+
+## 2026-09-22 — Step 7d carried out on Pro; the free plan stays open
+
+**Decision.** Descriptions are truncated to 500 characters and `fts` is stored once, as decided on
+2026-09-21, even though the project is now on Pro. `fts` is no longer a column on `videos`: it is
+computed in `videos_scored_live` with the same `'simple'` expression and stored only in the
+materialised view. `ingestion/backfill.py` truncates on write. The project stays on Pro for now.
+
+**Why do it on Pro.** Every refresh rebuilds the whole view, so a smaller view is a faster and
+safer monthly run. And moving back to the free plan is only possible if usage fits its limits, so
+shrinking keeps that option open.
+
+**Measured.** Database 566 → 280 MB, against an estimate of ~350. `videos` 273 → 66 MB,
+`videos_scored` 260 → 181 MB, `video_stats` unchanged at 21 MB. `VACUUM FULL` also cleared the old
+row versions left by the step 8b recompute, which is why `videos` beat its estimate. A plain
+refresh now takes 38 seconds, against 177 to 358 before. Row counts unchanged at 98,300; keyword
+search verified in a real browser.
+
+**Why the column was dropped before truncating.** While `videos.fts` existed as a generated column,
+each truncated description would have made Postgres recompute and rewrite that row's `fts`: 52,112
+search vectors built only to be discarded one step later. Order used: redefine the live view, drop
+the column, truncate, `VACUUM FULL`, plain refresh, `ANALYZE`. The expression was checked against
+the catalog before the switch, so search behaves exactly as before, apart from the truncation.
+
+**Free or Pro, the deciding factor.** 280 MB leaves about 220 MB below the free limit, roughly a
+year at the estimated ~18 MB a month. A refresh briefly holds a second copy of the view, peaking
+around 460 MB, but only for the duration of the refresh — under a minute. The WAL a refresh writes
+counts towards disk, not towards the database size the free plan limits. Decide after a few monthly
+runs have shown the real growth rate.
+
+## 2026-09-22 — Batching over video_id takes its cursor from the last row returned
+
+**Decision.** Any script that walks a table in batches with `WHERE video_id > cursor ORDER BY
+video_id LIMIT n` takes the next cursor from the last row Postgres returned, never from Python's
+`max()`. Alternatively, order with `COLLATE "C"`.
+
+**Why.** Postgres compares `video_id` under the database collation, `en_US.UTF-8`, which largely
+ignores case and treats `-` and `_` specially. Python's `max()` compares by code point. Video IDs
+are full of mixed case, hyphens and underscores, so Python's "last" was often not the batch's last
+row in Postgres order. In step 7d the truncation batches revisited about 9,151 rows, caught only
+because the script counted what it scanned: 107,451 against 98,300. The update was idempotent, so
+no harm was done.
+
+**Why it matters more than it looks.** The same mismatch can also make a batch start too late and
+skip rows, silently. Step 7d was verified afterwards (zero descriptions over 500 characters); a
+script without such a check would not have noticed. The step 6 refresh script will batch over
+`video_id` too.

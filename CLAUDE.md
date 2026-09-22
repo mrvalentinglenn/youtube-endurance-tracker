@@ -98,8 +98,9 @@ in one decisive step.
   means the Shorts check has not succeeded yet, which is distinct from false: such videos are
   excluded from both format baselines, and because the Shorts vs long-form filter is a required
   choice, they are not visible in the app at all until the reclassify job resolves them.
-- `videos` also has a generated `fts` column (tsvector over title + description). Postgres
-  maintains it; ingestion scripts never write to it.
+- `fts` (tsvector over title + description) is not a column on `videos`. It is computed in
+  `videos_scored_live` and stored only in `videos_scored`, with its GIN index. Ingestion scripts
+  never write it. See DECISIONS.md, 2026-09-22.
 - `videos` also stores `baseline_views`, `baseline_likes`, `baseline_comments` and `baseline_kind`
   ("era", "current" or "insufficient"), computed during the 30-day run. One `baseline_kind` covers
   all three, because the window logic is identical for each metric. Storing them keeps the score
@@ -111,9 +112,9 @@ in one decisive step.
   (video_id, captured_at), so a re-run on the same day updates instead of duplicating.
   `captured_at` is a date precisely for that reason: with a timestamp, two runs on one day are two
   different values, the constraint never fires, and the history silently doubles.
-- `videos_scored_live` — a plain view holding the scoring query: the join to `channels`, the
-  `DISTINCT ON` over `video_stats` for each video's latest measurement, and the three score
-  divisions. The logic lives here and nowhere else.
+- `videos_scored_live` — a plain view holding the scoring query: the join to `channels`, the `DISTINCT ON` over
+`video_stats` for each video's latest measurement, the three score divisions, and the `fts`
+computation. The logic lives here and nowhere else.
 - `videos_scored` — a materialised view over `videos_scored_live`, carrying the indexes, and the
   only object the front end reads. It keeps the name the front end already uses, so the read
   contract is unchanged. Refreshed by the ingestion run, never by the front end. SELECT is granted
@@ -153,9 +154,9 @@ writing 0 would record a disabled feature as an absence of engagement.
 Foreign keys have no cascade delete. Videos are never deleted, so a database that refuses to delete
 a channel while videos reference it is the safer default.
 
-Indexes on `videos`: `channel_id`, `published_at` and `is_short`. The full-text GIN index lives on
-`videos_scored`, not on `videos`: the front end searches the materialised view, so an index on the
-table served nothing and was dropped on 2026-09-21. Without these indexes the filters slow down
+Indexes on `videos`: `channel_id`, `published_at` and `is_short`. The full-text search lives entirely on `videos_scored`: the front end searches the materialised
+view, so the GIN index on the table was dropped on 2026-09-21 and the `fts` column itself on
+2026-09-22. Without these indexes the filters slow down
 badly once the archive holds tens of thousands of videos.
 
 ## Ingestion rules
@@ -180,12 +181,11 @@ corrects itself within 30 days.
 writes `description` truncates on write — the backfill, the refresh, and anything added later.
 Descriptions are front-loaded: the median is 535 characters, and the long tail is mostly sponsor
 links, timestamps and social handles that bloat the search index without helping anyone search.
-Existing rows are truncated in step 7d, which is under review since the Pro upgrade — see
-NEXT_STEPS.md. See DECISIONS.md, 2026-09-21. The front-end keyword search runs over titelplus
-plus description, using Postgres full-text search with the `'simple'` configuration: no stemming,
-no stopword removal. The channel set is multilingual, so a language-specific stemmer would apply
-one language's rules to all of them. Any script that rebuilds the `fts` column must use the same
-configuration.
+Existing rows were truncated in step 7d on 2026-09-22. See DECISIONS.md, 2026-09-21 and
+2026-09-22. The front-end keyword search runs over title plus description, using Postgres
+full-text search with the `'simple'` configuration: no stemming, no stopword removal. The channel
+set is multilingual, so a language-specific stemmer would apply one language's rules to all of
+them. The `fts` expression in `videos_scored_live` must keep that configuration.
 
 **Shorts vs long-form.** Duration is a pre-filter, not the classification. The Cycling Content
 Tracker started with duration alone and abandoned it: manual inspection found regular videos well
@@ -539,9 +539,9 @@ dark treatment, not only the background.
   EXISTS`; every change after it is a deliberate `ALTER TABLE`, shown to the owner before it runs.
 - Every script gets a `--test` mode that processes a handful of channels and prints results without
   writing to the database.
-- Keep `NEXT_STEPS.md` up to date: check off what is done, and add newly discovered open questions.
-- Record settled decisions in `DECISIONS.md`, with the date and the reasoning, and remove the
-  question from `NEXT_STEPS.md`. Never put decisions in `NEXT_STEPS.md`.
+- Never edit `CLAUDE.md`, `NEXT_STEPS.md` or `DECISIONS.md`. The owner updates the documentation
+  manually. Report what was done, what was measured and any new open question, so the owner can
+  record it.
 - A script writing to Supabase from multiple threads creates one client per thread via thread-local
   storage. Sharing a client across threads crashes on Windows (httpx.ReadError / WinError 10035).
 - The refresh run refreshes `videos_scored` as its last step, and only after its own checks have
@@ -554,8 +554,9 @@ dark treatment, not only the background.
   cannot exist in two places.
 - Anything long-running goes over the direct database connection (`SUPABASE_DB_URL`), never through
   the SQL editor or an RPC. Both sit behind Supabase's web gateway, which cuts requests off: the
-  editor returns "upstream timeout" and RPCs return 504. A concurrent refresh of `videos_scored`
-  takes about six minutes, so it can only run directly. Set a session `statement_timeout` for such
+  editor returns "upstream timeout" and RPCs return 504. Since step 7d a plain refresh of `videos_scored` takes about 38 seconds; a concurrent one takes
+longer and has not been re-measured. Refreshes run directly regardless: the gateway has cut them
+off before. Set a session `statement_timeout` for such
   work. `ingestion/refresh_scoring_view.py --direct` does this for the refresh; its RPC mode fails on this
   database and is to be removed.
 - Dropping and recreating `videos_scored` drops its indexes and its grants with it. Recreate all sixteen
@@ -568,5 +569,7 @@ dark treatment, not only the background.
   from 244 MB to 556 MB, and bloat means more pages to read on every query. A plain `REFRESH`
   rebuilds the view compactly — 556 back to 240 MB — but blocks reads while it runs. So: plain
   refreshes while there are no visitors; once the site is live, concurrent refreshes, with an
-  occasional plain one at a quiet moment to compact. Every refresh rebuilds all rows however little
-  changed, about three to six minutes, so batch data fixes into a single refresh.
+  occasional plain one at a quiet moment to compact. Every refresh rebuilds all rows however little changed, so batch data fixes into a single refresh.
+- A script that walks a table in batches over `video_id` takes the next cursor from the last row
+  Postgres returned, never from Python's `max()`, or orders with `COLLATE "C"`. The two sort
+  strings differently, so batches can overlap or silently skip rows. See DECISIONS.md, 2026-09-22.  

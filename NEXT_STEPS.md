@@ -7,18 +7,15 @@ Working document. Tick off what is done and add new questions as they come up.
 - [ ] **Does "last year" work as the default date filter?** Chosen provisionally. Check once real
       data is in the database whether it gives a good first impression.
 
-- [ ] **Is step 7d still needed now the project is on Pro?** On 2026-09-21 the database ran out of
-      disk — a concurrent refresh of `videos_scored` failed with `DiskFull` — and the project was
-      upgraded to Supabase Pro, with the disk then expanded manually, since upgrading alone does not
-      enlarge it. Last measured size: 684 MB, inflated by the step 8b baseline recompute, which left
-      an old version of every `videos` row behind. Step 7d was designed to stay under the free
-      tier's 0.5 GB; on Pro it is optional. Two things decide it: whether moving back to the free
-      plan is wanted (Supabase allows it only if usage fits the free limits), and how fast the
-      archive grows once step 6 runs. Measure the current size first.
+- [ ] **Free or Pro?** The project is on Pro. After step 7d the database is 280 MB against the free
+      plan's 500 MB, roughly a year of headroom at the estimated ~18 MB a month. Decide once the
+      entire app is built and deployed. Before deciding: measure the real growth over the monthly
+      runs that have happened by then, and check Supabase's current policy on pausing inactive
+      free projects, since a paused database takes the site down. See DECISIONS.md, 2026-09-22.
 
 ## Data issues in data/channels_complete.xlsx
 
-- [ ] **15 channels are marked `no youtube`** and have no ID. Skip them on import.
+- [x] **15 channels are marked `no youtube`** and have no ID. Skip them on import.
 
 
 ## Build order
@@ -49,15 +46,16 @@ Working document. Tick off what is done and add new questions as they come up.
        `name` and `subscriber_count` (~7 quota units). Then recomputes baselines
        (`compute_baselines.py`), since CLAUDE.md places the baseline computation in the 30-day run.
        Refreshes `videos_scored` as its final step, only after its own checks pass; a failed refresh
-       fails the run. Truncates descriptions to 500 characters on write, per CLAUDE.md — unless
-       step 7d's open question reverses that decision.
+       fails the run. Truncates descriptions to 500 characters on write.
        **The refresh must use the direct database connection** (`psycopg`, `SUPABASE_DB_URL` in the
-       root `.env`), not the `refresh_scoring_view()` RPC. Measured 2026-09-21: a concurrent refresh
-       takes ~358 seconds, far past Supabase's gateway, which returns 504 and does not let it
-       complete. `ingestion/refresh_scoring_view.py --direct` implements this; remove its RPC mode
-       when building this step. Set a session `statement_timeout` for the refresh; 30 minutes was
-       used. Once the site is live, refresh concurrently, with an occasional plain refresh at a
-       quiet moment to compact the view (DECISIONS.md, 2026-09-21).
+       root `.env`), not the `refresh_scoring_view()` RPC. A plain refresh takes about 38 seconds
+       since step 7d, but a concurrent one takes longer and the gateway has returned 504 before.
+       `ingestion/refresh_scoring_view.py --direct` implements this; remove its RPC mode when
+       building this step. Set a session `statement_timeout` for the refresh. Once the site is live,
+       refresh concurrently, with an occasional plain refresh at a quiet moment to compact the view
+       (DECISIONS.md, 2026-09-21).
+       Any batching over `video_id` takes its cursor from the last row returned, never Python's
+       `max()` (DECISIONS.md, 2026-09-22).
 7. [x] **Outlier Score, current baseline.** Compute the current baseline per channel, split by
        Shorts and long-form, for all three metrics (views, likes, comments) — `ingestion/
        compute_baselines.py`. Videos with null likes or comments are excluded from that metric's
@@ -81,15 +79,12 @@ Working document. Tick off what is done and add new questions as they come up.
         218 entries and stops, with no join, no `DISTINCT ON` and no sort. Cold versus warm is no
         longer a distinction: the query reads index pages, not 52MB of heap. 98,300 rows in both
         objects. Verified in the browser after an idle period.  
-7d. [ ] **Shrink the database** — optional since the Pro upgrade; see the open question. Measured
-        2026-09-21 on a 10% sample: truncating descriptions to 500 characters takes them from ~62 MB
-        to ~36 MB, and `fts` — built from the description and stored twice — from ~115 MB to ~68 MB
-        per copy. Two parts: (1) truncate every description to 500 characters, (2) remove the
-        duplicate `fts` from `videos`, keeping only the copy in the materialised view. Estimated
-        ~320 MB once complete. Returning the space needs `VACUUM FULL` of `videos`, which would also
-        clear the old row versions left by the step 8b recompute. `VACUUM FULL` cannot run inside a
-        function, but runs over the direct database connection set up on 2026-09-21. Decided in
-        DECISIONS.md, 2026-09-21. Reversible: descriptions can be re-fetched for ~2,000 quota units.             
+7d. [x] **Shrink the database.** Carried out on Pro, 2026-09-22. `videos_scored_live` now computes
+        `fts` itself; `videos.fts` dropped; 52,112 descriptions truncated to 500 characters;
+        `VACUUM FULL` of `videos`, plain refresh, `ANALYZE`. `backfill.py` truncates on write.
+        Database 566 → 280 MB, `videos` 273 → 66 MB, `videos_scored` 260 → 181 MB. Plain refresh
+        now 38 seconds. Row counts unchanged at 98,300; keyword search verified in a real browser.
+        See DECISIONS.md, 2026-09-22.             
 8. [x] **Era baselines.** Extended `ingestion/compute_baselines.py` with the era baseline for mature
        videos: 6-month window centred on the video's own date, widening to 12 months, falling back to
        the current baseline, then `'insufficient'`. Done: 342/342 channels, 0 write failures, every one
