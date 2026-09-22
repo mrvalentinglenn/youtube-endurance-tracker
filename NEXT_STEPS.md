@@ -7,11 +7,21 @@ Working document. Tick off what is done and add new questions as they come up.
 - [ ] **Does "last year" work as the default date filter?** Chosen provisionally. Check once real
       data is in the database whether it gives a good first impression.
 
-- [ ] **Free or Pro?** The project is on Pro. After step 7d the database is 280 MB against the free
-      plan's 500 MB, roughly a year of headroom at the estimated ~18 MB a month. Decide once the
-      entire app is built and deployed. Before deciding: measure the real growth over the monthly
-      runs that have happened by then, and check Supabase's current policy on pausing inactive
-      free projects, since a paused database takes the site down. See DECISIONS.md, 2026-09-22.
+- [ ] **Free or Pro?** The project is on Pro. The database was 280 MB after step 7d and is 430 MB
+      after step 10f added `videos_slim` (18 MB) and `videos_search` (117 MB), against the free
+      plan's 500 MB. Step 10h is expected to win most of that back. Decide once the entire app is
+      built and deployed. Before deciding: measure the real growth over the monthly runs that have
+      happened by then, and check Supabase's current policy on pausing inactive free projects,
+      since a paused database takes the site down. See DECISIONS.md, 2026-09-22.
+
+- [ ] **A per-channel cutoff for channels onboarded later.** New-video discovery uses the fixed
+      floor `BACKFILL_CUTOFF` (2023-09-19). A channel backfilled later gets a later cutoff from
+      `compute_cutoff()`, so its discovery walk could reach further back than its own backfill did.
+      Fixing it needs a per-channel cutoff column. Only matters once a channel is added.
+
+- [ ] **Small refresh.py fixes.** The "pending Shorts classification" count is off by one against
+      the classified total (723 vs 725, 11 vs 12); the data is fine, 0 are NULL. Avatars re-upload
+      all 342 every run, about 2.5 minutes; skipping unchanged ones would shorten the run.
 
 ## Data issues in data/channels_complete.xlsx
 
@@ -41,21 +51,18 @@ Working document. Tick off what is done and add new questions as they come up.
        it is written once (`ingestion/classify_shorts.py`). Throttling settled at concurrency 20, no
        delay (see DECISIONS.md, 2026-09-20). Done: 62,215/62,215 classified, 48,925 Shorts / 49,375
        long-form total in the database, 0 left NULL, 0 request failures, 0 429s, no drift-guard trip.
-6. [ ] **Refresh script — the 30-day run.** Adds videos published since the last run, re-measures
-       videos younger than 180 days, and re-fetches all channels via `channels.list` to update
-       `name` and `subscriber_count` (~7 quota units). Then recomputes baselines
-       (`compute_baselines.py`), since CLAUDE.md places the baseline computation in the 30-day run.
-       Refreshes `videos_scored` as its final step, only after its own checks pass; a failed refresh
-       fails the run. Truncates descriptions to 500 characters on write.
-       **The refresh must use the direct database connection** (`psycopg`, `SUPABASE_DB_URL` in the
-       root `.env`), not the `refresh_scoring_view()` RPC. A plain refresh takes about 38 seconds
-       since step 7d, but a concurrent one takes longer and the gateway has returned 504 before.
-       `ingestion/refresh_scoring_view.py --direct` implements this; remove its RPC mode when
-       building this step. Set a session `statement_timeout` for the refresh. Once the site is live,
-       refresh concurrently, with an occasional plain refresh at a quiet moment to compact the view
-       (DECISIONS.md, 2026-09-21).
-       Any batching over `video_id` takes its cursor from the last row returned, never Python's
-       `max()` (DECISIONS.md, 2026-09-22).
+6. [x] **Refresh script — the 30-day run.** `ingestion/refresh.py`, an orchestrator over the
+       existing scripts. Phase order: channels, new videos, re-measurement, Shorts check,
+       baselines, avatars, checks, refresh. Baselines write only rows that changed. Hard gates stop
+       the run before the refresh; avatar failures and Shorts-check aborts do not. Channels never
+       backfilled are skipped and reported. RPC mode removed from `refresh_scoring_view.py`.
+       First real run, 2026-09-22, found two bugs: 981 videos older than the cutoff imported from
+       channels with almost no known videos, and 7,887 young videos not re-measured because
+       paginated reads had no order. Fixed with a date floor (`BACKFILL_CUTOFF`, 2023-09-19) and an
+       order on every paginated read; the 981 were deleted as a one-off exception. Second real run:
+       20,730 re-measured + 2 no longer available = 20,732 under 180 days, 0 videos before the
+       cutoff, 0 `is_short` NULL, sentinel matches. About 12 minutes, 787 quota units, refresh
+       33 seconds. Database 294 MB. See DECISIONS.md, 2026-09-22.
 7. [x] **Outlier Score, current baseline.** Compute the current baseline per channel, split by
        Shorts and long-form, for all three metrics (views, likes, comments) — `ingestion/
        compute_baselines.py`. Videos with null likes or comments are excluded from that metric's
@@ -206,34 +213,51 @@ Working document. Tick off what is done and add new questions as they come up.
 10e. [x] **Card and filter-bar polish.** Warning triangle before the paid-promotion body line; sport
          buttons all shown active by default, with a click switching one off and the last one
          disabled; a tooltip on "still growing".
-10f. [ ] **Pagination on the category page: pages 1 to 4**, 60 videos each. Measured 2026-09-21 at
-         default filters: plain offset pagination is fast enough. Worst case, Influencers, Absolute,
-         page 4, reads 965 pages — about 1.9 seconds fully cold, 64% of the 3-second limit. Merged
-         categories run per category in parallel, so a merge costs its slowest category, not the sum.
-         Absolute is consistently 2 to 2.5 times the cost of Relative at the same depth. Caveat
-         before calling it done: these were default filters. Narrowing filters lengthen the walk —
-         the ~800 pages recorded for Influencers came from a narrower combination, against 76 at
-         defaults — and page 4 multiplies whatever the filters cost. Build offset pagination, then
-         measure one deliberately narrow combination at page 4, Absolute. If that exceeds the limit,
-         switch to keyset pagination: each page continues after the last value shown, so every page
-         costs about what page 1 does.
+10f. [x] **Category page: one page of 180, and narrow filters fixed.** Pagination dropped: the
+         category page shows 180 videos, no page controls. Measuring it exposed a live bug: narrow
+         filters timed out cold at any page size (Influencers, triathlon only: 12,487 pages, a
+         timeout confirmed in the browser after a fast reboot). Postgres walked the views-sorted
+         index and discarded ~57 of every 58 rows; extra indexes and statistics could not make it
+         choose better. Fixed by filtering on slim copies instead of the wide view, in two steps:
+         step 1 collects and sorts all matching rows from a slim, category-ordered materialised view
+         and takes the top ids (tie-broken by `video_id`); step 2 fetches those rows from
+         `videos_scored` by id, reordered in the browser. `videos_slim` (18 MB) serves every
+         non-keyword request; `videos_search` (117 MB, with `fts`) serves keyword search. Step 1 now
+         costs the same whatever the filters: 441 pages for Influencers, narrow or broad. Keyword
+         search runs on a Search button or Enter, never while typing; stopwords are stripped only
+         from phrases of two or more words, and a word that is also a channel name ("On") is never
+         stripped. "tour de france" went from 7,984 pages to 2,010. Verified: old and new routes
+         return identical rankings; triathlon loads immediately cold after a reboot. Both slim views
+         refresh plain, always, after `videos_scored`, with a row-count check across all three.
+         Database 294 → 430 MB. See DECISIONS.md, 2026-09-22.
 10g. [ ] **Video duration filter**, multi-select: under 1 min, 1–3, 3–20, 20–45, 45+ min, on
-         `duration_seconds`, which is already in the view. Rationale: paid ad videos are mostly under
-         a minute and almost always under three, so this gives users another way to exclude them.
-         Decide first: what the longer buckets mean under Shorts, which are all short; where the 54
-         videos with no duration go; and how the URL stores it, following the exclusion pattern.
-         Measure too: a narrow bucket, such as 45+ minutes on Brands, lengthens the index walk and
-         risks the timeouts step 10d fixed.           
+         `duration_seconds`, which is already in `videos_slim` and `videos_search`. Rationale: paid
+         ad videos are mostly under a minute and almost always under three, so this gives users
+         another way to exclude them. Since step 10f, the filter is one extra condition in step 1
+         and costs no extra measurement round. Decide first: what the longer buckets mean under
+         Shorts, which are all short; where the videos with no duration go (53 with `P0D` plus
+         NULLs — count them first); and how the URL stores it, following the exclusion pattern.
+10h. [ ] **Slim down `videos_scored`.** Since step 10f it only serves step 2: fetching rows by
+         `video_id`. Its `fts` column, its GIN index and its twelve sort indexes are likely unused
+         now. List what still uses each, then remove what nothing uses, to win back most of the
+         117 MB `videos_search` added. Removing a column means dropping and recreating the view:
+         reissue SELECT to `anon` and `service_role`, recreate the indexes that stay, and verify
+         via `pg_attribute` and `pg_class.relacl`. Matters for the free-plan decision and makes the
+         monthly refresh faster.                    
 11. [ ] **Deploy to Vercel** and add the environment variables there.
-12. [ ] **GitHub Actions workflow.** Schedule the refresh script monthly, with the keys in GitHub
-        Secrets, modelled on the Cycling Content Tracker's workflow. Trigger it manually once to
-        confirm it works. Include `SUPABASE_DB_URL` in GitHub Secrets: the refresh runs over the direct database connection.
+12. [ ] **GitHub Actions workflow.** Schedule `ingestion/refresh.py` monthly, with the keys in
+        GitHub Secrets, modelled on the Cycling Content Tracker's workflow. Secrets:
+        `YOUTUBE_API_KEY`, the Supabase secret key, `SUPABASE_DB_URL`, and the publishable key for
+        the sentinel check, which reads as `anon`. `psycopg[binary]` is in `requirements.txt`. A run takes about 14 minutes: three views are refreshed since step 10f. Trigger it manually once to confirm it works.
+        Verify the Shorts HEAD check from the runner before trusting it: YouTube's consent redirect
+        is regional, and GitHub's runners sit in US data centres, not in Spain. Run
+        `calibrate_shorts.py` or a known-status set from the runner once, and compare.
 12b. [ ] **Daily Shorts reclassify workflow.** A short script selecting videos with `is_short`
         NULL, re-running the HEAD check and writing back the result. Scheduled daily via GitHub
         Actions. Same script as backfill phase two (`ingestion/classify_shorts.py`). This is also
         what makes NULL-format videos visible in the app again: the format filter is a required
         choice, so a video with no format matches neither side and is unreachable until this job
-        resolves it. See DECISIONS.md, 2026-09-20.
+        resolves it. See DECISIONS.md, 2026-09-20. The same runner check as step 12 applies. `fetch_pending_work()` now orders on `video_id`.
 13. [ ] **Polish for the portfolio.** A short "how it works" page explaining the Outlier Score —
         including the known limitation that on channels which grew explosively, older videos still
         score somewhat low — plus a README with screenshots.

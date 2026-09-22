@@ -98,8 +98,8 @@ in one decisive step.
   means the Shorts check has not succeeded yet, which is distinct from false: such videos are
   excluded from both format baselines, and because the Shorts vs long-form filter is a required
   choice, they are not visible in the app at all until the reclassify job resolves them.
-- `fts` (tsvector over title + description) is not a column on `videos`. It is computed in
-  `videos_scored_live` and stored only in `videos_scored`, with its GIN index. Ingestion scripts
+- `fts` (tsvector over title + description) is not a column on `videos`. It is computed in `videos_scored_live`, stored in `videos_scored`, and copied into
+`videos_search`, which carries the GIN index that keyword search uses. Ingestion scripts
   never write it. See DECISIONS.md, 2026-09-22.
 - `videos` also stores `baseline_views`, `baseline_likes`, `baseline_comments` and `baseline_kind`
   ("era", "current" or "insufficient"), computed during the 30-day run. One `baseline_kind` covers
@@ -115,9 +115,9 @@ in one decisive step.
 - `videos_scored_live` — a plain view holding the scoring query: the join to `channels`, the `DISTINCT ON` over
 `video_stats` for each video's latest measurement, the three score divisions, and the `fts`
 computation. The logic lives here and nowhere else.
-- `videos_scored` — a materialised view over `videos_scored_live`, carrying the indexes, and the
-  only object the front end reads. It keeps the name the front end already uses, so the read
-  contract is unchanged. Refreshed by the ingestion run, never by the front end. SELECT is granted
+- `videos_scored` — a materialised view over `videos_scored_live`, holding every column a card displays. Since step
+10f the front end reads it only in step 2 of the ranking route: fetching the top rows by
+`video_id`. Filtering and sorting happen on `videos_slim` and `videos_search`. Refreshed by the ingestion run, never by the front end. SELECT is granted
   to `anon` for the front end and to `service_role` so ingestion scripts can verify what the app
   sees. Sixteen indexes:
   - unique on `video_id`, required by `REFRESH ... CONCURRENTLY`;
@@ -132,7 +132,21 @@ computation. The logic lives here and nowhere else.
   `score_comments`. `desc nulls last` is written into every definition to match the front end's
   `nullsFirst: false`; without the match, Postgres sorts on top of the index. There are deliberately
   no plain single-column sort indexes: every query filters on `is_short`, so they only ever did the
-  same work with twice the walk.
+  same work with twice the walk.   Since step 10f the sort indexes and the `fts` GIN index serve no front-end query; step 10h
+  reviews them for removal.
+
+- `videos_slim` — a materialised view over `videos_scored` holding only what filtering and sorting
+  need: `video_id`, `channel_id`, `category`, `subcategory`, the four sport flags, `is_short`,
+  `published_at`, `duration_seconds`, the three counts and the three scores. About 18 MB. Built
+  with `ORDER BY category, is_short`, so each category's rows are stored together; one index on
+  `(category, is_short)` and deliberately no sort indexes. Step 1 of every non-keyword ranking reads
+  it: collect all matching rows, sort, take the top ids. Its cost is the same whatever the filters,
+  441 pages for Influencers, narrow or broad. See DECISIONS.md, 2026-09-22.
+- `videos_search` — the same as `videos_slim` plus `fts`, with a GIN index on `fts`, also ordered by
+  category. About 117 MB. Step 1 of every keyword ranking reads it.
+- Both slim views are refreshed plain, always, after `videos_scored`, even once the site is live:
+  their category ordering only survives a full rebuild, and a concurrent refresh would scatter the
+  rows again. SELECT is granted to `anon` and `service_role`. 
 - `channels_public` — a plain view over `channels` exposing `channel_id`, `name`, `category`,
   `subcategory` and the four sport flags, granted to `anon`. It feeds the category filter's tree, so
   the subcategory taxonomy comes from data rather than code. 342 rows, so it is not materialised and
@@ -154,15 +168,17 @@ writing 0 would record a disabled feature as an absence of engagement.
 Foreign keys have no cascade delete. Videos are never deleted, so a database that refuses to delete
 a channel while videos reference it is the safer default.
 
-Indexes on `videos`: `channel_id`, `published_at` and `is_short`. The full-text search lives entirely on `videos_scored`: the front end searches the materialised
+Indexes on `videos`: `channel_id`, `published_at` and `is_short`. The full-text search lives entirely on `videos_search`: the front end searches that view,
 view, so the GIN index on the table was dropped on 2026-09-21 and the `fts` column itself on
 2026-09-22. Without these indexes the filters slow down
 badly once the archive holds tens of thousands of videos.
 
 ## Ingestion rules
 
-**Backfill.** Import all videos of every channel published in the last 36 months. Videos older
-than 36 months are not imported. Use the channel's uploads playlist via `playlistItems.list`,
+**Backfill.** Import all videos of every channel published in the last 36 months. Videos older than 36 months are
+not imported. The mass backfill of 2026-09-19 used the cutoff `BACKFILL_CUTOFF = 2023-09-19`, a
+fixed constant in `ingestion/backfill.py`; the refresh uses it as its floor. `compute_cutoff()`
+stays dynamic, for backfilling a channel onboarded later. Use the channel's uploads playlist via `playlistItems.list`,
 then fetch details in batches of 50 with `videos.list`.
 
 **Never use `search.list`.** It costs 100 quota units per call and returns unreliable results.
@@ -173,9 +189,17 @@ younger than 180 days. A video is therefore measured at roughly 30, 60, 90, 120,
 of age. After 180 days a video is frozen: its last measurement is final. New videos published since
 the previous run are added in the same job. The refresh also re-fetches all channels via
 `channels.list` and updates `name` and `subscriber_count` (~7 quota units), so a renamed channel
-corrects itself within 30 days.
+corrects itself within 30 days. The run is `ingestion/refresh.py`, in this order: channels, new videos, re-measurement, Shorts
+check, baselines, avatars, checks, refresh. New videos are found by walking each channel's uploads
+playlist from the newest item. The walk stops after 5 consecutive videos already in `videos`, or
+after 5 consecutive videos published before `BACKFILL_CUTOFF`; a video before the cutoff is never
+imported. Both stops are needed: a channel with few videos in the table rarely meets 5 known in a
+row, and without the date stop its whole back catalogue is imported. Channels with
+`last_checked_at` NULL have never been backfilled and are skipped; a new channel is added by
+running the import, then the backfill. Avatar failures are logged and never fail the run.
 
-**Retention.** Videos are never deleted for being old. After 180 days a video is frozen, but it stays in the database and remains searchable.
+**Retention.** Videos are never deleted for being old. After 180 days a video is frozen, but it stays in the database and remains searchable. The one exception: on 2026-09-22, 981 videos older than the cutoff, imported by a bug, were
+deleted. See DECISIONS.md, 2026-09-22.
 
 **Descriptions.** Store the first 500 characters of the video description, never the full text. Every script that
 writes `description` truncates on write — the backfill, the refresh, and anything added later.
@@ -185,7 +209,11 @@ Existing rows were truncated in step 7d on 2026-09-22. See DECISIONS.md, 2026-09
 2026-09-22. The front-end keyword search runs over title plus description, using Postgres
 full-text search with the `'simple'` configuration: no stemming, no stopword removal. The channel
 set is multilingual, so a language-specific stemmer would apply one language's rules to all of
-them. The `fts` expression in `videos_scored_live` must keep that configuration.
+them. The `fts` expression in `videos_scored_live` must keep that configuration. Stopwords are handled at query time only, never in the stored `fts`: a query of two or more words
+has stopwords in English, Spanish, German, Dutch, French and Italian stripped, so "tour de france"
+searches "tour france". A single word is always searched as typed, and so is a phrase made only of
+stopwords. A word that is also a channel name in `channels_public`, such as the brand "On", is never
+stripped.
 
 **Shorts vs long-form.** Duration is a pre-filter, not the classification. The Cycling Content
 Tracker started with duration alone and abandoned it: manual inspection found regular videos well
@@ -233,7 +261,9 @@ recalculation.
 **Where the computation runs.** Baselines are computed in Python during the 30-day run, not in SQL.
 A readable loop that can be stepped through and checked by hand for a single channel is worth more
 here than one dense statement, and the era windows in particular are awkward to express in SQL. The
-view does only the division: current value over stored baseline.
+view does only the division: current value over stored baseline. The computation writes only rows whose baseline actually changed, comparing stored and computed
+values as the same number type. Most of the archive is frozen, so rewriting every row each month
+would bloat `videos` for nothing.
 
 
 **Two baselines, depending on the age of the video.**
@@ -323,8 +353,8 @@ failure.
 Content Tracker. Time is controlled entirely through the publication-date filter below.
 
 **Two routes.** `/` is the homepage: one section per category, in fixed order, each showing that
-category's top videos under the current filters. `/category/:categories` shows a single merged
-ranking of 60 videos across one or more categories, given as a comma-separated list of slugs —
+category's top videos under the current filters. `/category/:categories` shows a single merged ranking of 180 videos, on one page with no pagination, across one or more
+categories, given as a comma-separated list of slugs —
 `brands`, `influencers`, `athletes`, `teams`, `organizers` — e.g. `/category/brands,teams`. Its
 heading names the selection, and a plain "Back to home" link sits above the results. Which
 categories it covers is set with the same category filter as the homepage, described below. A
@@ -397,9 +427,9 @@ stored. When the user re-ticks one channel inside an excluded subcategory, the s
 `nosub` and its other channels join `nochan`. An exclusion under a switched-off category is inert
 until that category comes back. A `nochan` ID no longer in `channels_public` is ignored.
 
-Search is debounced and commits with `replace`, so the back button does not step through fragments
-of a word; clearing it and every other control use `push`. "Show more" and "Back to home" carry
-every param except `nocat`.
+Keyword search runs only when the user clicks Search or presses Enter, never while typing, and
+commits with `push`, like every other control. Clearing it uses `push` too. "Show more" and "Back
+to home" carry every param except `nocat`.
 
 **The category filter.** Five dropdown buttons in the filter bar, one per category in the fixed
 section order, identical on both routes. Inside each: a checkbox for the whole category, a search
@@ -465,9 +495,8 @@ the metric toggle changes. Red means one thing on this card and nothing else.
 filter is a required choice, each grid holds exactly one aspect ratio. Columns differ by format:
 long-form 1 / 2 / 3 / 4 across mobile / tablet / laptop / wide, Shorts 3 / 4 / 5 / 5. Long-form
 stacks on mobile because a 16:9 thumbnail at a third of a 375px screen is about 110px wide, too
-small to read a title against, while a portrait Short survives that width. A single page size of 60
-serves both formats: it divides cleanly into every column count above, so neither grid ends on a
-ragged row.
+small to read a title against, while a portrait Short survives that width.The category page shows 180 videos in both formats: 180 divides cleanly into every column count
+above, so neither grid ends on a ragged row.
 Those counts are the category page. The homepage shows fewer per section: long-form 1 / 3 / 3 / 3
 across mobile / tablet / laptop / wide, Shorts 3 / 3 / 5 / 5. Shorts always fetch 5 and the 4th and
 5th are hidden below laptop in CSS, so the row count is never read from the viewport in JavaScript
@@ -478,18 +507,23 @@ section stays roughly as tall as a long-form one.
 reads are fast regardless of cache state, and the scoring logic can change in SQL with no front-end
 work.
 
-**Merged rankings are fetched one category at a time.** When the category page covers more than one
-category, it sends one query per category, in parallel, each with identical filters, sort and a
-limit of 60, then merges them in the browser and keeps the first 60. The result is identical to one
-query across all of them — any video in the combined top 60 is in its own category's top 60 — but
-each query reads its category-first index instead of walking past every other category. Measured
-cold, a two-category merge fell from 4,204 pages and 5.3 seconds to 339 pages. The slowest single
-category is Influencers at about 800 pages, roughly 1.6 seconds fully cold: the one to watch as the
-archive grows.
+**The front end never computes a score.** Scores come from `videos_scored`, so scoring logic can
+change in SQL with no front-end work.
 
-The browser's merge must sort exactly as the database does — descending, NULLs last — so under
-Relative an unscored video never sits above a scored one. If any one category's query fails, the
-whole ranking shows the error: a ranking missing a category would look complete and be wrong.
+**Every ranking is fetched in two steps.** Step 1 queries `videos_slim`, or `videos_search` when
+there is a keyword: filters, then the sort column `desc nulls last`, then `video_id` as a
+tie-breaker, with the page's limit, returning only ids. Step 2 fetches those rows from
+`videos_scored` with `.in("video_id", ids)`, and the browser reorders them to step 1's order,
+because the IN query returns them in no guaranteed order and rank is positional. Homepage sections
+use the same two steps with their smaller limits. The previous single-query route walked a sorted
+index and discarded non-matching rows, so a narrow filter such as one sport timed out cold: 12,487
+pages for Influencers with triathlon only. See DECISIONS.md, 2026-09-22.
+
+**Merged rankings are fetched one category at a time.** When the category page covers more than one
+category, step 1 runs once per category, in parallel, each with identical filters, sort and a limit
+of 180. The browser merges the results and keeps the first 180, then step 2 fetches them in one
+call. The result is identical to one query across all of them: any video in the combined top 180 is
+in its own category's top 180.
 
 **The card never carries a fixed width.** It is `w-full` and takes the width its grid cell gives it,
 deriving height from aspect-ratio classes. The Cycling Content Tracker lost a session to this: a
@@ -538,18 +572,20 @@ dark treatment, not only the background.
 - Never write SQL that drops or recreates a table. The initial schema used `CREATE TABLE IF NOT
   EXISTS`; every change after it is a deliberate `ALTER TABLE`, shown to the owner before it runs.
 - Every script gets a `--test` mode that processes a handful of channels and prints results without
-  writing to the database.
+  writing to the database. Every phase must be scoped to that sample, API calls included: two
+  phases of `refresh.py` once called the API for the whole archive in `--test`. Counts in `--test`
+  are labelled "would write", never "written".
 - Never edit `CLAUDE.md`, `NEXT_STEPS.md` or `DECISIONS.md`. The owner updates the documentation
   manually. Report what was done, what was measured and any new open question, so the owner can
   record it.
 - A script writing to Supabase from multiple threads creates one client per thread via thread-local
   storage. Sharing a client across threads crashes on Windows (httpx.ReadError / WinError 10035).
-- The refresh run refreshes `videos_scored` as its last step, and only after its own checks have
-  passed: a run that failed must not publish its data to the site. A failed refresh fails the run,
+- The refresh run refreshes `videos_scored`, then `videos_slim`, then `videos_search`, as its last
+step, and only after its own checks have passed. Afterwards it checks that all three have the same
+row count, and runs the sentinel check: a run that failed must not publish its data to the site. A failed refresh fails the run,
   with an error message naming it. A materialised view that silently stops refreshing is the one
   failure mode this project cannot otherwise see.
-- `videos_scored_live` holds the scoring query; `videos_scored` is a materialised copy of its
-  output and is the only object the front end reads. Change scoring in the live view and refresh —
+- `videos_scored_live` holds the scoring query; `videos_scored` is a materialised copy of its output, and the slim views are copies of that.. Change scoring in the live view and refresh —
   never edit the materialised view, which is `select * from` the live one precisely so the logic
   cannot exist in two places.
 - Anything long-running goes over the direct database connection (`SUPABASE_DB_URL`), never through
@@ -557,8 +593,8 @@ dark treatment, not only the background.
   editor returns "upstream timeout" and RPCs return 504. Since step 7d a plain refresh of `videos_scored` takes about 38 seconds; a concurrent one takes
 longer and has not been re-measured. Refreshes run directly regardless: the gateway has cut them
 off before. Set a session `statement_timeout` for such
-  work. `ingestion/refresh_scoring_view.py --direct` does this for the refresh; its RPC mode fails on this
-  database and is to be removed.
+  work. `ingestion/refresh_scoring_view.py` does this for the refresh; its RPC mode was removed on
+2026-09-22.
 - Dropping and recreating `videos_scored` drops its indexes and its grants with it. Recreate all sixteen
   indexes and reissue SELECT to `anon` and `service_role`, then verify before moving on.
 - `information_schema` does not describe materialised views: it reports no columns and no grants for
@@ -570,6 +606,9 @@ off before. Set a session `statement_timeout` for such
   rebuilds the view compactly — 556 back to 240 MB — but blocks reads while it runs. So: plain
   refreshes while there are no visitors; once the site is live, concurrent refreshes, with an
   occasional plain one at a quiet moment to compact. Every refresh rebuilds all rows however little changed, so batch data fixes into a single refresh.
-- A script that walks a table in batches over `video_id` takes the next cursor from the last row
-  Postgres returned, never from Python's `max()`, or orders with `COLLATE "C"`. The two sort
-  strings differently, so batches can overlap or silently skip rows. See DECISIONS.md, 2026-09-22.  
+- Every paginated read orders on a unique column: `video_id`, or the primary key. Without an
+  `.order()`, pages from `.range()` can overlap and skip rows silently: the first real refresh
+  re-measured 12,621 of 20,728 young videos with no error. A script that walks a table in batches
+  over `video_id` takes the next cursor from the last row Postgres returned, never from Python's
+  `max()`, or orders with `COLLATE "C"`: the two sort strings differently. See DECISIONS.md,
+  2026-09-22. 

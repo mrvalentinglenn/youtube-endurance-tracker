@@ -32,6 +32,9 @@ videos in the window, capped at 20, minimum 10". Kept for the reasoning; do not 
 
 ## 2026-09-18 — Videos are never deleted for being old
 
+**Amended 2026-09-22** by "981 old videos deleted: a one-off exception". The rule stands; one
+deliberate exception was made for videos imported by a bug.
+
 **Decision.** Nothing is removed from the database because of its age. After 180 days a video is
 frozen, meaning it gets no new measurements, but it stays stored and searchable.
 
@@ -332,6 +335,9 @@ Tracker. Waiting 30 days for the next refresh to correct a transient failure is 
 with a small set that is harmless. Add a counter only if it becomes a real problem.
 
 ## 2026-09-19 — Full-text search uses the 'simple' configuration
+
+**Amended 2026-09-22** by "Keyword search runs on its own slim view, on a Search button". The stored
+`fts` still has no stopword removal; stopwords are now stripped at query time, in phrases only.
 
 **Decision.** The `videos.fts` generated column uses `to_tsvector('simple', title || description)`.
 No stemming, no stopword removal.
@@ -859,6 +865,9 @@ less. Same badge, opposite implication, useful in both.
 
 ## 2026-09-20 — Thumbnail aspect ratios and grid columns, adapted from the Cycling Content Tracker
 
+**Amended 2026-09-22** by "Rejected: pagination on the category page". The category page shows 180,
+not 60; 180 divides into the same column counts.
+
 **Decision.** Long-form 16:9, Shorts 9:16. Columns: long-form 1 / 2 / 3 / 4 across mobile / tablet /
 laptop / wide, Shorts 3 / 4 / 5 / 5. One page size of 60 for both formats.
 
@@ -921,6 +930,9 @@ helper: when the number used for the query and the number used for the rank dive
 silently skipped or repeated between pages and the list still looks entirely plausible.
 
 ## 2026-09-20 — Scoring moves to a materialised view
+
+**Amended 2026-09-22** by "Rankings filter and sort on a slim, category-ordered copy". `videos_scored`
+is no longer the object rankings are read from; it serves the second step, fetching rows by id.
 
 **Amended 2026-09-21** by "Category-first sort indexes on videos_scored". The one index per sort
 column described under "Indexes are the point" was replaced; the reasoning about `nulls last`
@@ -1327,6 +1339,12 @@ comparable with the earlier entry's. The Feed could not be checked: its YouTube 
 **Amended 2026-09-21** by "Plain refreshes while there are no visitors; compact after concurrent
 ones". `ingestion/refresh_scoring_view.py --direct` now implements this for the refresh.
 
+**Amended 2026-09-22** by "Rankings filter and sort on a slim, category-ordered copy". `videos_slim`
+and `videos_search` are always refreshed plain, also once the site is live.
+
+**Amended 2026-09-22** by "The 30-day run is one orchestrator over the existing scripts". The RPC
+mode of `refresh_scoring_view.py` has been removed; the direct connection is the only path.
+
 **Decision.** Anything long-running — refreshing `videos_scored`, `VACUUM FULL`, rebuilding the view
 — runs over a direct Postgres connection with `psycopg`, using `SUPABASE_DB_URL` from the root
 `.env`, not through the SQL editor or an RPC.
@@ -1347,8 +1365,7 @@ networks and some runners lack. The Session pooler works over IPv4.
 ## 2026-09-21 — Upgraded to Supabase Pro
 
 **Amended 2026-09-22** by "Step 7d carried out on Pro". The truncation and `fts` decision is no
-longer under review: it was carried out. Whether to return to the free plan is decided after a few
-monthly runs.
+longer under review: it was carried out. Whether to return to the free plan is decided after building and deploying the entire app.
 
 **Decision.** The project moved to the Pro plan, and its disk was expanded manually.
 
@@ -1465,6 +1482,9 @@ whoever reaches for it next.
 
 ## 2026-09-21 — Category-first sort indexes on videos_scored
 
+**Amended 2026-09-22** by "Rankings filter and sort on a slim, category-ordered copy". No front-end
+query reads these indexes any more; they are up for removal in NEXT_STEPS.md step 10h.
+
 **Decision.** The six plain sort indexes on `videos_scored` were replaced by twelve: six
 category-first, `(category, is_short, <col> desc nulls last)`, and six format-first,
 `(is_short, <col> desc nulls last)`, over `views`, `likes`, `comments`, `score_views`,
@@ -1501,6 +1521,9 @@ equals the default and should store nothing. Selecting all four now removes the 
 carries no sport condition at all.
 
 ## 2026-09-21 — Merged rankings are fetched per category and merged in the browser
+**Amended 2026-09-22** by "Rankings filter and sort on a slim, category-ordered copy". The per-category
+merge stands, now on the slim views with a limit of 180. Ties are no longer undefined: every ranking
+sorts on `video_id` after the sort column, which costs nothing now that the sort happens in memory.
 
 **Decision.** When the category page covers several categories, it sends one query per category in
 parallel — same filters, same sort, limit 60 — merges them in the browser, sorting exactly as the
@@ -1534,6 +1557,10 @@ effect visible only in a nearly empty ranking. Left as it is.
 
 ## 2026-09-22 — Step 7d carried out on Pro; the free plan stays open
 
+**Amended 2026-09-22** by "Rankings filter and sort on a slim, category-ordered copy" and "Keyword
+search runs on its own slim view, on a Search button". The database grew from 294 to 430 MB with the
+two slim views.
+
 **Decision.** Descriptions are truncated to 500 characters and `fts` is stored once, as decided on
 2026-09-21, even though the project is now on Pro. `fts` is no longer a column on `videos`: it is
 computed in `videos_scored_live` with the same `'simple'` expression and stored only in the
@@ -1558,10 +1585,12 @@ the catalog before the switch, so search behaves exactly as before, apart from t
 **Free or Pro, the deciding factor.** 280 MB leaves about 220 MB below the free limit, roughly a
 year at the estimated ~18 MB a month. A refresh briefly holds a second copy of the view, peaking
 around 460 MB, but only for the duration of the refresh — under a minute. The WAL a refresh writes
-counts towards disk, not towards the database size the free plan limits. Decide after a few monthly
-runs have shown the real growth rate.
+counts towards disk, not towards the database size the free plan limits. Decide once the entire app is built and deployed, using the growth measured by then.
 
 ## 2026-09-22 — Batching over video_id takes its cursor from the last row returned
+
+**Amended 2026-09-22** by "Every paginated read orders on a unique column". The same class of bug
+appeared a second time, in a different form.
 
 **Decision.** Any script that walks a table in batches with `WHERE video_id > cursor ORDER BY
 video_id LIMIT n` takes the next cursor from the last row Postgres returned, never from Python's
@@ -1578,3 +1607,215 @@ no harm was done.
 skip rows, silently. Step 7d was verified afterwards (zero descriptions over 500 characters); a
 script without such a check would not have noticed. The step 6 refresh script will batch over
 `video_id` too.
+
+## 2026-09-22 — The 30-day run is one orchestrator over the existing scripts
+
+**Decision.** `ingestion/refresh.py` runs the monthly job by calling the existing scripts rather
+than duplicating them. `compute_baselines.py` and `sync_avatars.py` had their work extracted from
+`main()` into a callable `run()`; `classify_shorts.py` is reused unchanged; helpers from
+`backfill.py` are imported. Phase order: channels, new videos, re-measurement, Shorts check,
+baselines, avatars, checks, refresh.
+
+**Why this order.** Baselines need the complete data of the run — new videos, fresh measurements
+and resolved formats — so they come after all three. Avatars come before the refresh so a new logo
+is visible the same month, but after everything that feeds the scores, so decoration never sits in
+front of data.
+
+**Hard gates.** Any one stops the run with a non-zero exit, and the refresh does not happen:
+`videos` row count drops; a baseline write fails; more than 5% of channels fail; quota passes
+9,500 (warning at 8,000). A failed run leaves `videos_scored` showing last month's data: stale but
+correct.
+
+**Deliberately not gates.** A `classify_shorts` abort, such as on a 429: its videos stay NULL, are
+excluded from baselines and are retried later. An avatar failure: decoration, not data. A video
+that no longer exists on YouTube: `videos.list` silently omits deleted and private videos, so they
+are skipped and logged, never written as zeros and never counted as a failed channel.
+
+**Channels never backfilled are skipped.** A channel with `last_checked_at` NULL has no videos in
+the table, so discovery has nothing to compare against. It is reported by name. Onboarding a
+channel stays manual: the import, then the backfill.
+
+**Verification reads as `anon`.** After the refresh, a sentinel video's stored baseline is compared
+with the baseline implied by `videos_scored`, read with the publishable key. `service_role` could
+read the view since 2026-09-21, but reading as `anon` also tests the grant a rebuild of the view
+can silently drop.
+
+**Rejected: merging the two `channels.list` passes.** Channel metadata and avatar sync each list all
+342 channels, about 7 quota units each. Merging saves 7 units a month and would pull avatar logic
+into the main path, which the 2026-09-21 avatar decision deliberately kept apart.
+
+**Measured, first real runs.** About 12 minutes, 734 and 787 quota units. Baselines ~3.5 minutes,
+avatars ~2.5, refresh ~33 seconds.
+
+## 2026-09-22 — Baselines write only what changed
+
+**Decision.** `compute_baselines.py` still computes every baseline, but writes only rows whose
+computed values differ from what is stored. Stored and computed values are compared as the same
+number type.
+
+**Why.** It used to rewrite all 98,300 rows every run. Most of the archive is frozen, so nearly all
+of those writes changed nothing and left an old row version behind — the bloat that took
+`videos_scored` from 244 to 556 MB and filled the disk once already.
+
+**Why the type matters.** A value read back from the database and one just computed in Python can be
+different types for the same number. Compared naively, every row looks changed and gets rewritten,
+with no error. Checked empirically what the client returns before writing the comparison.
+
+**Tested both ways.** Running the step twice with no new data: the second run writes 0 rows. And a
+positive test: one baseline on 226ERS set from 537 to 538 was detected and corrected (written 1),
+then written 0, and read back as 537. The first test alone would also pass for a comparison that
+always answers "unchanged", which would silently stop baselines updating.
+
+**Rejected for now: skipping computation for provably frozen videos.** A video whose whole era window
+is frozen can never get a new baseline. Real, but it saves compute time, not writes, and predicting
+"frozen" correctly is logic with room for a subtle bug. Revisit if the step becomes slow.
+
+## 2026-09-22 — New-video discovery stops at a fixed date floor
+
+**Decision.** The refresh never imports a video published before `BACKFILL_CUTOFF`
+(2023-09-19, the cutoff of the mass backfill, now a fixed constant in `backfill.py`). The playlist
+walk stops after 5 consecutive videos before the cutoff, alongside the existing stop after 5
+consecutive known videos. `compute_cutoff()` stays dynamic for backfilling future channels.
+
+**Why.** The first real run imported 1,219 "new" videos, of which 981 were older than 36 months,
+back to 2007. International Swimming League, Cádomotus, Hincapie, triathlon.de and HUUB had 0 to 3
+videos after the backfill, because they published little in the window. With so few known videos,
+"5 known in a row" never happens, so the walk ran to the end of the playlist, or into the 10-page
+cap for ISL.
+
+**Why a fixed date and not now() minus 36 months.** A moving floor would admit nothing new here, but
+it expresses the wrong rule: the backfill boundary was a one-off at import time, and the archive
+grows forward from it.
+
+**Verified.** Simulating each channel's post-deletion state, all five stop on the first page after
+6 to 8 old videos. The real run afterwards found none of them.
+
+**Known gap.** A channel onboarded later gets its own, later cutoff from `compute_cutoff()`, but
+discovery uses the fixed 2023 floor, so its walk could reach further back than its own backfill
+did. Fixing this properly needs a per-channel cutoff column. Open question in NEXT_STEPS.md.
+
+## 2026-09-22 — 981 old videos deleted: a one-off exception
+
+**Decision.** The 981 videos imported by the discovery bug above were deleted, with their
+`video_stats` rows. A deliberate exception to "videos are never deleted".
+
+**Why.** They entered through a bug, not by design. The archive's stated scope is 36 months from
+the backfill; keeping them would have given five channels history back to 2007 while the other
+337 stop at 2023, so "All time" would mean something different per channel.
+
+**How.** Selected by both conditions: published before the cutoff, and their only `video_stats`
+row dated 2026-09-22. The set was frozen in a temporary table, then stats and videos deleted in one
+transaction, committed automatically only because the checks read 981 / 0 / 0. The floor was built
+first, or the next run would have imported them again. A second real run then recomputed baselines
+without them.
+
+**The rule stands.** Like the two spreadsheet edits, this is a one-off correction, not a precedent.
+
+## 2026-09-22 — Every paginated read orders on a unique column
+
+**Decision.** Every read that pages with `.range()` orders on a unique column: `video_id`, or the
+table's primary key (`id` for `video_stats`, `channel_id` for `channels`). Applied to all eight
+unordered reads found in `ingestion/`.
+
+**Why.** Without an explicit order, Postgres returns rows in whatever order its plan produces, and
+successive pages of the same query can overlap and skip rows. The first real refresh re-measured
+12,621 of 20,728 young videos, with no error. Reproduced read-only three times: 3,301, 4,000 and
+7,887 rows lost, different every time.
+
+**Why "tested stable" was not enough.** The per-channel reads in `compute_baselines.py` returned
+complete results on the largest channels, TNT Sports Cycling and FloTrack, because an equality
+lookup on an indexed column happens to follow the same plan each time. Nothing guarantees that; 19
+channels exceed the 1,000-row page. Ordered now, rather than waiting for the plan to change.
+
+**Verified.** The second real run re-measured 20,730 videos plus 2 no longer available, against
+20,732 under 180 days: an exact match.
+
+## 2026-09-22 — Rejected: pagination on the category page
+
+**Rejected.** Pages 1 to 4 of 60 videos each, first as offset pagination, then as keyset pagination.
+
+**Why not.** Measuring page 4 with a narrow filter (Influencers, Absolute, triathlon only) read
+16,019 pages, far past the 3-second limit. Keyset pagination would not have fixed that: the cost
+came from the narrow filter discarding rows, and keyset only spreads the same walk over more
+requests. It would also have needed a cursor per category in the URL for merged rankings. Smaller
+pages of 20 or 30 were rejected for the same reason: fewer matches to find, but the same rate of
+discarding, so a slightly narrower filter breaks again.
+
+**Instead.** One page of 180 videos, no page controls. 180 divides cleanly into every column count,
+where 150 does not. The measurement also showed that page 1 itself was already too slow with a
+narrow filter, which led to the next entry.
+
+## 2026-09-22 — Rankings filter and sort on a slim, category-ordered copy
+
+**Decision.** Every ranking is fetched in two steps. Step 1 reads `videos_slim`, a materialised view
+over `videos_scored` holding only the columns filters and sorts need, stored with
+`ORDER BY category, is_short`, with one index on `(category, is_short)` and no sort indexes. It
+collects every matching row, sorts by the sort column, then `video_id`, and returns the top ids.
+Step 2 fetches those rows from `videos_scored` by id, and the browser restores step 1's order.
+Merges and homepage sections use the same two steps.
+
+**The problem.** Narrow filters timed out cold on the live page, at any page size. Influencers with
+triathlon only read 12,487 pages for 180 videos: only 276 of 18,973 videos match, and Postgres
+walked the views-sorted index from the top, discarding about 57 of every 58 rows. Confirmed in the
+browser after a fast database reboot. The materialised view had fixed the cost of computing each
+row, not the cost of skipping rows that do not match.
+
+**Why the planner could not be steered.** It estimated 2,364 matching rows against 276 real ones,
+because it treats category, sport and date as unrelated. An index leading straight to the matching
+rows was ignored; extended statistics and raised statistics targets did not change its choice.
+
+**Why a slim copy.** Without a sorted index to gamble on, Postgres always does the same thing:
+collect the matches, then sort them. At 18 MB, a tenth of `videos_scored`, that is cheap however
+many rows match, and the cost depends on the size of the copy, not on how rare the matches are.
+Stored in category order, one category's rows sit together: step 1 reads 441 pages for Influencers,
+narrow or broad, against 2,180 unordered. The same request that read 12,487 pages now loads
+immediately cold.
+
+**Why always refreshed plain.** The category ordering only survives a full rebuild. A concurrent
+refresh applies changes in place and would scatter the rows again. At 18 MB, a plain refresh blocks
+reads for seconds.
+
+**Verified.** Old and new routes return identical rankings for two single categories and a merge.
+Ties now sort deterministically on `video_id`, at no cost, since the sort happens in memory. Step
+10g's duration filter needs only one more condition in step 1.
+
+## 2026-09-22 — Rejected: routing narrow and broad requests to different query shapes
+
+**Rejected.** New sport-flag indexes plus a forced "collect first, then sort" query, used only when
+a request is judged narrow, and today's sorted-index walk otherwise.
+
+**Why not.** The forced shape fixed the narrow case (12,487 → 280 pages) and broke the broad one
+(771 → 5,930 pages), so every request would have to be classified correctly first. "Any filter
+active" is the wrong test: deselecting one sport, or excluding FloTrack, is a filter but still
+broad. A correct test needs a count before every query, a database function the front end calls
+over RPC, and a threshold that has to be measured, with the duration filter adding more
+combinations. The slim copy removes the choice instead of automating it.
+
+## 2026-09-22 — Keyword search runs on its own slim view, on a Search button
+
+**Decision.** Keyword search uses the same two steps, with step 1 on `videos_search`: the columns of
+`videos_slim` plus `fts`, with a GIN index on `fts`, ordered by category and refreshed plain. The
+query runs only when the user clicks Search or presses Enter, never while typing. Stopwords in
+English, Spanish, German, Dutch, French and Italian are stripped at query time, only from queries of
+two or more words. A single word, or a phrase made only of stopwords, is searched as typed. A word
+that is also a channel name in `channels_public` is never stripped.
+
+**Why.** Single words were safe even when common, but phrases were not: "tour de france" read 7,984
+pages, because the planner misjudged how rare the combination is, the same kind of mistake as the
+narrow filters. Stripping "de" and moving step 1 to the ordered search view brought it to 2,010.
+
+**Why phrases only.** "On" is an English stopword and a running brand. Stripping it from a single
+word would make On unsearchable, or turn the search into no filter at all. The check against channel
+names found exactly this one collision.
+
+**Why a button.** A debounced search fired whenever the user paused, so fragments like "the" were
+searched on their way to "the best gear to run". A button sends only the finished query, which is
+usually a phrase and therefore cheap.
+
+**What it costs.** `videos_search` is 117 MB, most of it a second copy of the search data. The
+database went from 294 to 430 MB. Removing what `videos_scored` no longer needs (NEXT_STEPS.md, step
+10h) is expected to win most of it back.
+
+**Open.** A single very common word searched cold, right after a reboot, failed once with a
+"schema cache" error: the API had not finished starting, so the query never ran. Warm it takes
+25 ms. Retest cold once.
