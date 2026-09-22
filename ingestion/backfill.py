@@ -188,7 +188,7 @@ def build_records(item, channel_id, today):
         "video_id": video_id,
         "channel_id": channel_id,
         "title": snippet["title"],
-        "description": snippet.get("description", ""),
+        "description": snippet.get("description", "")[:500],
         "published_at": published_at.isoformat(),
         "duration_seconds": duration_seconds,
         "is_short": is_short,
