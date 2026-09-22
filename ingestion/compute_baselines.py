@@ -179,6 +179,7 @@ def fetch_channel_videos(channel_id):
                 "baseline_views, baseline_likes, baseline_comments, baseline_kind"
             )
             .eq("channel_id", channel_id)
+            .order("video_id")
             .range(start, start + FETCH_PAGE_SIZE - 1)
             .execute()
         )
@@ -203,6 +204,7 @@ def fetch_latest_stats(video_ids):
                 supabase.table("video_stats")
                 .select("video_id, captured_at, views, likes, comments")
                 .in_("video_id", id_chunk)
+                .order("id")
                 .range(start, start + FETCH_PAGE_SIZE - 1)
                 .execute()
             )

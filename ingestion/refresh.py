@@ -63,6 +63,7 @@ import sync_avatars
 from backfill import (
     YOUTUBE_PLAYLIST_ITEMS_URL,
     YOUTUBE_VIDEOS_URL,
+    BACKFILL_CUTOFF,
     BATCH_SIZE as API_BATCH_SIZE,
     WRITE_CHUNK_SIZE,
     build_records,
@@ -79,6 +80,7 @@ FETCH_PAGE_SIZE = 1000
 CHANNELS_BATCH_SIZE = 50
 YOUNG_AGE_DAYS = 180
 CONSECUTIVE_KNOWN_STOP = 5
+CONSECUTIVE_BEFORE_CUTOFF_STOP = 5  # mirrors backfill.py's MAX_CONSECUTIVE_OUTSIDE_WINDOW
 NEW_VIDEO_MAX_PAGES = 10  # safety cap; a normal month never approaches this
 SHORT_DURATION_SECONDS = 180
 TEST_SAMPLE_SIZE = 5
@@ -190,6 +192,7 @@ def fetch_known_video_ids(channel_id):
             supabase.table("videos")
             .select("video_id")
             .eq("channel_id", channel_id)
+            .order("video_id")
             .range(start, start + FETCH_PAGE_SIZE - 1)
             .execute()
         )
@@ -203,9 +206,16 @@ def fetch_known_video_ids(channel_id):
 
 def discover_new_video_ids(uploads_playlist_id, known_ids, quota):
     """Pages the uploads playlist from newest, stopping after CONSECUTIVE_KNOWN_STOP
-    consecutive already-known videos. Returns (new_video_ids, hit_page_cap)."""
+    consecutive already-known videos, or after CONSECUTIVE_BEFORE_CUTOFF_STOP consecutive
+    videos published before BACKFILL_CUTOFF. Videos before the cutoff are never added to
+    new_ids -- discovery must never import anything the original backfill deliberately
+    left out. A channel with almost no known videos (e.g. because its whole catalogue sat
+    outside the 36-month backfill window) used to have no way to trigger the
+    already-known stop and would walk its entire history; the cutoff stop closes that
+    gap independently. Returns (new_video_ids, hit_page_cap)."""
     new_ids = []
     consecutive_known = 0
+    consecutive_before_cutoff = 0
     page_token = None
     pages = 0
 
@@ -227,9 +237,21 @@ def discover_new_video_ids(uploads_playlist_id, known_ids, quota):
 
         stop = False
         for item in data.get("items", []):
-            video_id = item["contentDetails"].get("videoId")
-            if not video_id:
-                continue
+            details = item["contentDetails"]
+            video_id = details.get("videoId")
+            published_at_str = details.get("videoPublishedAt")
+            if not video_id or not published_at_str:
+                continue  # deleted/private playlist entry; ignore, don't affect either counter
+
+            published_at = datetime.fromisoformat(published_at_str.replace("Z", "+00:00"))
+            if published_at < BACKFILL_CUTOFF:
+                consecutive_before_cutoff += 1
+                if consecutive_before_cutoff >= CONSECUTIVE_BEFORE_CUTOFF_STOP:
+                    stop = True
+                    break
+                continue  # never imported, and never counted toward consecutive_known
+            consecutive_before_cutoff = 0
+
             if video_id in known_ids:
                 consecutive_known += 1
                 if consecutive_known >= CONSECUTIVE_KNOWN_STOP:
@@ -316,7 +338,7 @@ def fetch_young_videos(channel_ids=None):
         query = supabase.table("videos").select("video_id, published_at, channel_id").gte("published_at", cutoff)
         if channel_ids:
             query = query.in_("channel_id", channel_ids)
-        response = query.range(start, start + FETCH_PAGE_SIZE - 1).execute()
+        response = query.order("video_id").range(start, start + FETCH_PAGE_SIZE - 1).execute()
         rows = response.data
         for row in rows:
             videos[row["video_id"]] = datetime.fromisoformat(row["published_at"].replace("Z", "+00:00"))
@@ -519,14 +541,27 @@ def run(test_mode=False, concurrent_refresh=False, refresh_timeout_minutes=REFRE
     written_word = "would write" if test_mode else "written"
     measured_word = "would measure" if test_mode else "measured"
 
+    phase_durations = {}
+
+    def phase_start():
+        return time.monotonic()
+
+    def phase_end(label, start):
+        elapsed = time.monotonic() - start
+        phase_durations[label] = elapsed
+        print(f"  ({label} took {elapsed:.1f}s)")
+
     try:
         # --- Phase: channels.list ---
+        t0 = phase_start()
         print(f"\n--- Channel metadata ({len(channels)} channel(s)) ---", flush=True)
         metadata = fetch_channel_metadata([c["channel_id"] for c in channels], quota)
         channels_updated, channels_not_found = update_channel_metadata(channels, metadata, test_mode)
         print(f"  {updated_word.capitalize()}: {channels_updated}. Not found in API response: {len(channels_not_found)}.")
+        phase_end("Channel metadata", t0)
 
         # --- Phase: new videos ---
+        t0 = phase_start()
         print(f"\n--- New videos ---", flush=True)
         new_written_total = 0
         pending_total = 0
@@ -547,11 +582,13 @@ def run(test_mode=False, concurrent_refresh=False, refresh_timeout_minutes=REFRE
         failed_rate = len(failed_channels) / len(channels) if channels else 0
         print(f"  New videos {written_word}: {new_written_total}. Channels failed: {len(failed_channels)} "
               f"({failed_rate:.1%}).")
+        phase_end("New videos", t0)
 
         # --- Phase: re-measure videos under 180 days ---
         # Scoped to the --test sample's own channels in test mode -- otherwise this phase
         # alone would cost a real run's ~410 videos.list calls even under --test, which
         # defeats the point of a "handful of channels" preview.
+        t0 = phase_start()
         print(f"\n--- Re-measuring videos under {YOUNG_AGE_DAYS} days ---", flush=True)
         young_videos = fetch_young_videos(channel_ids=[c["channel_id"] for c in channels] if test_mode else None)
         if not sentinels and young_videos:
@@ -564,8 +601,10 @@ def run(test_mode=False, concurrent_refresh=False, refresh_timeout_minutes=REFRE
             print(f"  No --sentinel given; auto-selected {sentinels[0]} for post-refresh verification.")
         remeasure_result = remeasure_young_videos(young_videos, quota, test_mode, today)
         print(f"  {measured_word.capitalize()}: {remeasure_result['measured']}. Missing (deleted/private): {remeasure_result['missing']}.")
+        phase_end("Re-measurement", t0)
 
         # --- Phase: Shorts classification ---
+        t0 = phase_start()
         print(f"\n--- Shorts classification ---", flush=True)
         shorts_result = run_shorts_classification(test_mode, in_memory_pending=pending_ids_total)
         print(
@@ -574,18 +613,23 @@ def run(test_mode=False, concurrent_refresh=False, refresh_timeout_minutes=REFRE
             f"still NULL: {shorts_result['still_null']}"
             + (f" (aborted: {shorts_result['aborted_reason']})" if shorts_result["aborted"] else "")
         )
+        phase_end("Shorts classification", t0)
 
         # --- Phase: baselines ---
+        t0 = phase_start()
         print(f"\n--- Baselines ---", flush=True)
         if test_mode:
             baseline_totals = compute_baselines.run(test_mode=True, sample_size=TEST_SAMPLE_SIZE)
         else:
             baseline_totals = compute_baselines.run(test_mode=False)
+        phase_end("Baselines", t0)
 
         # --- Phase: avatars ---
+        t0 = phase_start()
         print(f"\n--- Avatars ---", flush=True)
         avatar_result = run_avatars(test_mode)
         quota.total += avatar_result.get("quota_used", 0)  # tracked, but avatars never trip the hard stop retroactively
+        phase_end("Avatars", t0)
 
     except QuotaExceeded as error:
         failure = str(error)
@@ -624,6 +668,8 @@ def run(test_mode=False, concurrent_refresh=False, refresh_timeout_minutes=REFRE
     )
     print(f"Avatars -- {uploaded_word}: {avatar_result['uploaded']}, no thumbnail: {avatar_result['no_thumbnail']}, failed: {avatar_result['failed']}")
     print(f"Total quota used: {quota.total} / 10,000")
+    if phase_durations:
+        print("Phase durations: " + ", ".join(f"{label}={elapsed:.1f}s" for label, elapsed in phase_durations.items()))
 
     if test_mode:
         print("\n--test: no writes were made, refresh was not called.")
@@ -635,10 +681,14 @@ def run(test_mode=False, concurrent_refresh=False, refresh_timeout_minutes=REFRE
         return {"ok": False, "failure": failure}
 
     # --- Refresh ---
+    t0 = phase_start()
     print(f"\n--- Refresh ---", flush=True)
     all_match = refresh_scoring_view.run(
         sentinels or [], timeout_minutes=refresh_timeout_minutes, concurrent=concurrent_refresh,
     )
+    phase_end("Refresh (incl. verification)", t0)
+    print("Phase durations: " + ", ".join(f"{label}={elapsed:.1f}s" for label, elapsed in phase_durations.items()))
+
     if not all_match:
         print("\nFAILED: refresh ran but sentinel verification did not match.")
         return {"ok": False, "failure": "refresh verification failed"}

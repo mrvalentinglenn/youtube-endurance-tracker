@@ -62,6 +62,7 @@ def fetch_pending_work():
             supabase.table("videos")
             .select("video_id, channel_id")
             .is_("is_short", "null")
+            .order("video_id")
             .range(start, start + FETCH_PAGE_SIZE - 1)
             .execute()
         )

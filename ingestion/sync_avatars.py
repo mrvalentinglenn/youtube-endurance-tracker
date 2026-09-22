@@ -65,7 +65,7 @@ def fetch_channels():
         response = (
             supabase.table("channels")
             .select("channel_id, name")
-            .order("name")
+            .order("channel_id")
             .range(start, start + FETCH_PAGE_SIZE - 1)
             .execute()
         )

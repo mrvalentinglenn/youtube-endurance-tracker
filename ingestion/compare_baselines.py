@@ -131,6 +131,7 @@ def fetch_views_for_channel_longform(channel_id):
             .select("video_id, published_at, views")
             .eq("channel_id", channel_id)
             .eq("is_short", False)
+            .order("video_id")
             .range(start, start + FETCH_PAGE_SIZE - 1)
             .execute()
         )

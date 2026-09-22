@@ -42,6 +42,14 @@ BATCH_SIZE = 50  # both playlistItems.list maxResults and videos.list batch size
 WRITE_CHUNK_SIZE = 250  # rows per upsert; a large brand channel can exceed 1,000 videos
 BACKFILL_MONTHS = 36
 MAX_CONSECUTIVE_OUTSIDE_WINDOW = 5
+
+# The cutoff actually used by the one mass backfill run that populated this channel set
+# (all 342 channels' last_checked_at fall on 2026-09-19; compute_cutoff() at that moment
+# resolved to 2023-09-19). Fixed, not recomputed: refresh.py's new-video discovery must
+# never import anything the original backfill deliberately left out, and a moving
+# now() - 36 months would drift further from that boundary every month. compute_cutoff()
+# below stays dynamic -- it's still needed for onboarding a channel in the future.
+BACKFILL_CUTOFF = datetime(2023, 9, 19, tzinfo=timezone.utc)
 SHORT_DURATION_SECONDS = 180
 TEST_SAMPLE_SIZE = 5
 QUOTA_COST_PER_CALL = 1
