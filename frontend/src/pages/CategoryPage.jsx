@@ -6,7 +6,9 @@ import FilterBar from '../components/FilterBar'
 import VideoGrid from '../components/VideoGrid'
 import ThemeToggle from '../components/ThemeToggle'
 
-const PAGE_LIMIT = 60
+// One page, no pagination (NEXT_STEPS.md step 10f): 180 divides cleanly into every
+// column count long-form (1/2/3/4) and Shorts (3/4/5) use, so neither grid ends ragged.
+const PAGE_LIMIT = 180
 
 export default function CategoryPage() {
   const { categories: categoriesParam } = useParams()

@@ -2,7 +2,7 @@
 
   channels.list (name, subscriber_count) -> new videos -> re-measure videos under 180
   days -> Shorts check for newly-pending videos, with in-run retries -> baselines ->
-  avatars -> checks -> refresh videos_scored.
+  avatars -> checks -> refresh videos_scored, videos_slim and videos_search.
 
 Avatar failures are logged and never fail the run (DECISIONS.md, 2026-09-21: avatars are
 decoration, kept off the import's failure path). A classify_shorts abort (429, consecutive
@@ -37,11 +37,16 @@ or quota used passed 9,500 (soft warning at 8,000). videos_scored keeps showing 
 previous run's data on failure -- stale but correct, never a refresh built on a run that
 didn't finish cleanly.
 
-Refresh: plain by default (the site has no visitors yet), over the direct connection,
-with a session statement_timeout. See refresh_scoring_view.py.
+Refresh: videos_scored is plain by default (the site has no visitors yet) and switches to
+concurrent with --concurrent-refresh once it is live. videos_slim and videos_search always
+refresh plain, regardless of that flag: their rows are physically ordered by
+(category, is_short) so a narrow-filter query can read a short range instead of scanning
+the whole thing, and only a full rebuild preserves that ordering -- a concurrent refresh
+applies row-by-row diffs and would scatter it back to an unordered layout. All three run
+over the direct connection with a session statement_timeout. See refresh_scoring_view.py.
 
 Usage:
-    python refresh.py            # writes to the database, refreshes videos_scored
+    python refresh.py            # writes to the database, refreshes videos_scored, videos_slim and videos_search
     python refresh.py --test     # 5 channels, real API calls, no writes, no refresh
     python refresh.py --concurrent-refresh   # once the site is live
 """
@@ -690,7 +695,7 @@ def run(test_mode=False, concurrent_refresh=False, refresh_timeout_minutes=REFRE
     print("Phase durations: " + ", ".join(f"{label}={elapsed:.1f}s" for label, elapsed in phase_durations.items()))
 
     if not all_match:
-        print("\nFAILED: refresh ran but sentinel verification did not match.")
+        print("\nFAILED: refresh ran but a post-refresh check did not pass -- see the Refresh section above.")
         return {"ok": False, "failure": "refresh verification failed"}
 
     print("\nRun completed successfully.")

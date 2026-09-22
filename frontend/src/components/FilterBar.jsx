@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { DATE_OPTIONS, SPORTS, categoryBySlug, resolveFilters, withParam } from '../lib/filters'
 import { useChannelTree } from '../lib/channelTree'
@@ -8,7 +8,6 @@ import ExclusionChips from './ExclusionChips'
 const METRICS = ['views', 'likes', 'comments']
 const COMPARISONS = ['absolute', 'relative']
 const FORMATS = ['longform', 'shorts']
-const SEARCH_DEBOUNCE_MS = 400
 const ALL_SPORT_SLUGS = SPORTS.map((s) => s.slug)
 
 function label(word) {
@@ -98,8 +97,11 @@ export default function FilterBar({ categoryState }) {
     setFilter('sports', normalized)
   }
 
-  // Local buffer for the search box: committed to the URL debounced, with replace so
-  // the back button doesn't step through fragments of a word typed one keystroke apart.
+  // Local buffer for the search box: the query only runs on a deliberate submit (the
+  // Search button, or Enter), never while typing -- no debounce, no query fired for a
+  // word the user hasn't finished typing. Committed with push, like "Show more" and every
+  // other deliberate action: a search is a real navigation step, worth its own back-button
+  // stop, unlike the old typing-debounce which used replace specifically to avoid that.
   const [searchBuffer, setSearchBuffer] = useState(filters.q)
   const [syncedQ, setSyncedQ] = useState(filters.q)
 
@@ -111,13 +113,16 @@ export default function FilterBar({ categoryState }) {
     setSearchBuffer(filters.q)
   }
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setFilter('q', searchBuffer, { replace: true })
-    }, SEARCH_DEBOUNCE_MS)
-    return () => clearTimeout(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only the buffer should retrigger the timer
-  }, [searchBuffer])
+  function handleSearchSubmit() {
+    setFilter('q', searchBuffer, { replace: false })
+  }
+
+  function handleSearchKeyDown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      handleSearchSubmit()
+    }
+  }
 
   function handleClearSearch() {
     setSearchBuffer('')
@@ -229,9 +234,17 @@ export default function FilterBar({ categoryState }) {
           type="text"
           value={searchBuffer}
           onChange={(e) => setSearchBuffer(e.target.value)}
+          onKeyDown={handleSearchKeyDown}
           placeholder="Search title and description..."
           className="border border-gray-300 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100 dark:placeholder-gray-500 rounded px-2 py-1 text-sm flex-1 max-w-sm"
         />
+        <button
+          type="button"
+          onClick={handleSearchSubmit}
+          className="px-3 py-1 rounded border text-sm border-gray-300 text-gray-700 dark:border-gray-700 dark:text-gray-300"
+        >
+          Search
+        </button>
         {searchBuffer && (
           <button
             type="button"

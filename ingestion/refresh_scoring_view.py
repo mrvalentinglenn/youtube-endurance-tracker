@@ -1,5 +1,16 @@
-"""Refreshes the videos_scored materialised view over a direct Postgres connection, and
-verifies against the database rather than trusting the call's own response.
+"""Refreshes the videos_scored, videos_slim and videos_search materialised views over a
+direct Postgres connection, and verifies against the database rather than trusting the
+call's own response.
+
+videos_slim is a slim, category-and-format-ordered copy of videos_scored's own columns
+(NEXT_STEPS.md step 10f), used by the front end's step 1 (filter and sort) before step 2
+fetches full rows from videos_scored for just the matching video_ids. videos_search is the
+same idea for a keyword search: the same slim columns plus fts and its own GIN index, so a
+narrow keyword filter doesn't have to walk videos_scored's much larger table either. Both
+always refresh plain, never concurrently, regardless of what videos_scored does -- a
+concurrent refresh applies row-by-row diffs and would scatter their (category, is_short)
+physical ordering back to an unordered layout, which is the entire reason step 1 is cheap
+for either of them.
 
 Only the direct path exists now. The original design called the refresh_scoring_view()
 RPC (DECISIONS.md, 2026-09-20) through the Supabase client -- the only way to run DDL
@@ -65,17 +76,18 @@ def build_anon_client():
     return create_client(url_match.group(1).strip(), key_match.group(1).strip())
 
 
-def run_refresh(timeout_minutes=DIRECT_STATEMENT_TIMEOUT_MINUTES, concurrent=False):
+def run_refresh(view_name="videos_scored", timeout_minutes=DIRECT_STATEMENT_TIMEOUT_MINUTES, concurrent=False):
     """Opens its own psycopg connection -- no REST/RPC gateway in the path. autocommit=True:
     SET statement_timeout must apply to the session before the REFRESH runs, not be scoped
-    to (and rolled back with) a transaction."""
+    to (and rolled back with) a transaction. view_name is never user input -- always one of
+    the two known view names -- so interpolating it into the statement is safe."""
     if not SUPABASE_DB_URL:
         raise RuntimeError("SUPABASE_DB_URL is not set (check the root .env).")
 
     statement = (
-        "REFRESH MATERIALIZED VIEW CONCURRENTLY public.videos_scored"
+        f"REFRESH MATERIALIZED VIEW CONCURRENTLY public.{view_name}"
         if concurrent else
-        "REFRESH MATERIALIZED VIEW public.videos_scored"
+        f"REFRESH MATERIALIZED VIEW public.{view_name}"
     )
     print("Connecting directly to Postgres (session pooler)...", flush=True)
     with psycopg.connect(SUPABASE_DB_URL, autocommit=True) as conn:
@@ -120,25 +132,56 @@ def verify_sentinel(anon_client, video_id):
     return matches
 
 
+SLIM_VIEWS = ("videos_slim", "videos_search")
+
+
+def verify_row_counts_match(anon_client):
+    """videos_slim and videos_search carry no computation of their own -- both are direct
+    column subsets of videos_scored -- so all three row counts must always be equal. A
+    mismatch means one refresh silently ran on stale data or didn't complete, the one
+    failure mode a materialised view gives no other signal for."""
+    scored_count = anon_client.table("videos_scored").select("video_id", count="exact").limit(1).execute().count
+    counts = {"videos_scored": scored_count}
+    for view_name in SLIM_VIEWS:
+        counts[view_name] = anon_client.table(view_name).select("video_id", count="exact").limit(1).execute().count
+
+    matches = all(count == scored_count for count in counts.values())
+    counts_str = ", ".join(f"{name}: {count}" for name, count in counts.items())
+    print(f"  {counts_str} -- {'MATCH' if matches else 'MISMATCH'}")
+    return matches
+
+
 def run(sentinels, timeout_minutes=DIRECT_STATEMENT_TIMEOUT_MINUTES, concurrent=False):
-    """Callable core, reused by this script's own CLI main() and by refresh.py. Refreshes,
-    then verifies every sentinel; returns True only if the refresh ran AND every sentinel
-    matched. A caller with no sentinels to check should not call this -- verification is
-    the whole point, not an optional extra (see main()'s own guard below).
+    """Callable core, reused by this script's own CLI main() and by refresh.py. Refreshes
+    videos_scored (plain or concurrent, as requested), then videos_slim and videos_search
+    -- always plain, regardless of `concurrent`: their (category, is_short) physical
+    ordering is what makes a narrow-filter query on them cheap, and only a full rebuild
+    preserves that ordering. Verifies row counts match across all three views, then every
+    sentinel against videos_scored. Returns True only if every refresh ran AND every check
+    passed. A caller with no sentinels to check should not call this -- verification is the
+    whole point, not an optional extra (see main()'s own guard below).
     """
-    run_refresh(timeout_minutes=timeout_minutes, concurrent=concurrent)
+    run_refresh("videos_scored", timeout_minutes=timeout_minutes, concurrent=concurrent)
+    for view_name in SLIM_VIEWS:
+        run_refresh(view_name, timeout_minutes=timeout_minutes, concurrent=False)
 
     anon_client = build_anon_client()
+
+    print("\nVerifying row counts match:")
+    counts_match = verify_row_counts_match(anon_client)
+
     print("\nVerifying against videos_scored:")
     all_match = True
     for video_id in sentinels:
         if not verify_sentinel(anon_client, video_id):
             all_match = False
 
+    all_match = all_match and counts_match
+
     if all_match:
-        print("\nAll sentinels match. Refresh confirmed complete.")
+        print("\nAll checks pass. Refresh confirmed complete.")
     else:
-        print("\nAt least one sentinel did not match -- the refresh may not have completed. Not confirmed.")
+        print("\nAt least one check did not pass -- the refresh may not have completed. Not confirmed.")
     return all_match
 
 
