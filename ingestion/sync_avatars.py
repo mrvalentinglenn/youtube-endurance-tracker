@@ -160,12 +160,15 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
-
+def run(test_mode=False, sample_size=None):
+    """Callable core, reused by this script's own CLI main() and by refresh.py. Never
+    raises on a per-channel failure -- avatars are decoration (DECISIONS.md, 2026-09-21,
+    "Why a separate script": "a failed avatar must never fail an import"), so refresh.py
+    logs this summary and moves on regardless of what it says. Returns the summary dict.
+    """
     channels = fetch_channels()
-    if args.test:
-        channels = channels[:TEST_SAMPLE_SIZE]
+    if sample_size:
+        channels = channels[:sample_size]
         print(f"--test: processing {len(channels)} channel(s), no uploads and no database writes.\n")
 
     channel_ids = [c["channel_id"] for c in channels]
@@ -177,7 +180,7 @@ def main():
 
     for channel in channels:
         thumbnails = thumbnails_by_id.get(channel["channel_id"])
-        result = sync_channel(channel, thumbnails, args.test)
+        result = sync_channel(channel, thumbnails, test_mode)
 
         if result["status"] == "uploaded":
             uploaded.append(result)
@@ -198,7 +201,7 @@ def main():
 
     print("\n--- Summary ---")
     print(f"Channels read: {len(channels)}")
-    print(f"Avatars {'that would be ' if args.test else ''}uploaded: {len(uploaded)}")
+    print(f"Avatars {'that would be ' if test_mode else ''}uploaded: {len(uploaded)}")
     print(f"Skipped, no thumbnail: {len(no_thumbnail)}")
     for r in no_thumbnail:
         print(f"  {r['channel']['name']} ({r['channel']['channel_id']})")
@@ -206,6 +209,16 @@ def main():
     for r in failed:
         print(f"  {r['channel']['name']} ({r['channel']['channel_id']}): {r['reason']}")
     print(f"Quota units used: {quota_used}")
+
+    return {
+        "channels_read": len(channels), "uploaded": len(uploaded),
+        "no_thumbnail": len(no_thumbnail), "failed": len(failed), "quota_used": quota_used,
+    }
+
+
+def main():
+    args = parse_args()
+    run(test_mode=args.test, sample_size=TEST_SAMPLE_SIZE if args.test else None)
 
 
 if __name__ == "__main__":

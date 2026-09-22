@@ -163,14 +163,21 @@ def fetch_channels(channel_id=None):
 
 
 def fetch_channel_videos(channel_id):
-    """All of the channel's videos: video_id, published_at (parsed), is_short. Paginated --
-    several channels exceed 1,000 videos (FloTrack alone has 5,529)."""
+    """All of the channel's videos: video_id, published_at (parsed), is_short, and the
+    currently-stored baseline columns. The stored columns are read here, not fetched
+    separately, so process_channel can compare a freshly computed payload against what's
+    already there and skip writing rows that would not actually change -- see
+    baseline_unchanged(). Paginated -- several channels exceed 1,000 videos (FloTrack
+    alone has 5,529)."""
     videos = []
     start = 0
     while True:
         response = (
             supabase.table("videos")
-            .select("video_id, published_at, is_short")
+            .select(
+                "video_id, published_at, is_short, "
+                "baseline_views, baseline_likes, baseline_comments, baseline_kind"
+            )
             .eq("channel_id", channel_id)
             .range(start, start + FETCH_PAGE_SIZE - 1)
             .execute()
@@ -379,19 +386,57 @@ def update_with_retry(payload, video_ids):
     raise last_error
 
 
-def apply_group(payload, video_ids, test_mode, executor, futures):
+def numeric_equal(existing, computed):
+    """existing: a baseline_* value read back from videos (confirmed empirically to come
+    back as a plain int or float, not a string -- checked against the installed client
+    directly rather than assumed). computed: a Python int/float from median(). Both
+    normalised to float before comparing: an int 9832 and a float 9832.0 are the same
+    stored value, and comparing them unnormalised would make every such row look
+    'changed' and get rewritten for no reason.
+    """
+    if existing is None or computed is None:
+        return existing is None and computed is None
+    return float(existing) == float(computed)
+
+
+def baseline_unchanged(existing_row, payload):
+    """True if `payload` (the freshly computed baseline_views/likes/comments/kind) is
+    identical to what's already stored for this video. existing_row is None for a video
+    fetch_channel_videos didn't have a stored baseline for yet (e.g. a video written
+    this same run) -- never call this unchanged, so a first-time write always happens.
+    """
+    if existing_row is None:
+        return False
+    return (
+        numeric_equal(existing_row.get("baseline_views"), payload["baseline_views"])
+        and numeric_equal(existing_row.get("baseline_likes"), payload["baseline_likes"])
+        and numeric_equal(existing_row.get("baseline_comments"), payload["baseline_comments"])
+        and existing_row.get("baseline_kind") == payload["baseline_kind"]
+    )
+
+
+def apply_group(payload, video_ids, existing_by_id, test_mode, executor, futures):
     """Submits each chunk's write to the shared executor rather than writing inline: era
     baselines produce far more distinct payloads than step 7 did, so writes need to
     overlap rather than run one at a time. Futures are collected, not awaited here --
     the caller waits for all of them once, after every channel has been processed, so a
     write failure surfaces clearly instead of being silently outrun by the next channel.
+
+    video_ids whose stored baseline already matches `payload` are left alone entirely --
+    not written, not counted as written -- so a monthly run doesn't rewrite all 98,300
+    rows every time most of them are frozen and could not have changed. Returns
+    (changed, unchanged) counts.
     """
     if not video_ids:
-        return 0
+        return 0, 0
+    changed_ids = [vid for vid in video_ids if not baseline_unchanged(existing_by_id.get(vid), payload)]
+    unchanged_count = len(video_ids) - len(changed_ids)
+    if not changed_ids:
+        return 0, unchanged_count
     if not test_mode:
-        for chunk in chunked(video_ids, UPDATE_CHUNK_SIZE):
+        for chunk in chunked(changed_ids, UPDATE_CHUNK_SIZE):
             futures.append(executor.submit(update_with_retry, payload, chunk))
-    return len(video_ids)
+    return len(changed_ids), unchanged_count
 
 
 def metrics_summary(baseline):
@@ -455,10 +500,11 @@ def process_channel(channel, cutoff_180, cutoff_24mo, test_mode, era_only, execu
     if not videos:
         print(f"{name} ({channel_id}): no videos")
         return dict(
-            format_missing=False, young_updated=0, young_insufficient=0,
-            era_6mo=0, era_12mo=0, era_fallback=0, era_insufficient=0, era_updated=0,
+            format_missing=False, young_written=0, young_unchanged=0, young_insufficient=0,
+            era_6mo=0, era_12mo=0, era_fallback=0, era_insufficient=0, era_written=0, era_unchanged=0,
         )
 
+    existing_by_id = {v["video_id"]: v for v in videos}
     stats_by_video = fetch_latest_stats([v["video_id"] for v in videos])
 
     # Mature, known-format videos with a stats row: candidates for any baseline pool.
@@ -529,12 +575,18 @@ def process_channel(channel, cutoff_180, cutoff_24mo, test_mode, era_only, execu
         "baseline_views": None, "baseline_likes": None, "baseline_comments": None, "baseline_kind": "insufficient",
     }
 
-    young_updated = 0
+    young_written = 0
+    young_unchanged = 0
     young_insufficient = 0
     if not era_only:
-        young_updated += apply_group(current_payload_for(True), groups["shorts"], test_mode, executor, futures)
-        young_updated += apply_group(current_payload_for(False), groups["long_form"], test_mode, executor, futures)
-        young_updated += apply_group(unknown_current_payload, groups["unknown_format"], test_mode, executor, futures)
+        for payload, ids in (
+            (current_payload_for(True), groups["shorts"]),
+            (current_payload_for(False), groups["long_form"]),
+            (unknown_current_payload, groups["unknown_format"]),
+        ):
+            written, unchanged = apply_group(payload, ids, existing_by_id, test_mode, executor, futures)
+            young_written += written
+            young_unchanged += unchanged
 
         if current_payload_for(True)["baseline_kind"] == "insufficient":
             young_insufficient += len(groups["shorts"])
@@ -577,34 +629,149 @@ def process_channel(channel, cutoff_180, cutoff_24mo, test_mode, era_only, execu
 
     era_insufficient += len(mature_unknown_format_ids)
 
-    era_updated = 0
+    era_written = 0
+    era_unchanged = 0
     for (views, likes, comments, kind), video_ids in era_write_groups.items():
         payload = {"baseline_views": views, "baseline_likes": likes, "baseline_comments": comments, "baseline_kind": kind}
-        era_updated += apply_group(payload, video_ids, test_mode, executor, futures)
-    era_updated += apply_group(unknown_current_payload, mature_unknown_format_ids, test_mode, executor, futures)
+        written, unchanged = apply_group(payload, video_ids, existing_by_id, test_mode, executor, futures)
+        era_written += written
+        era_unchanged += unchanged
+    written, unchanged = apply_group(
+        unknown_current_payload, mature_unknown_format_ids, existing_by_id, test_mode, executor, futures
+    )
+    era_written += written
+    era_unchanged += unchanged
 
     total_mature = sum(len(mature_subjects_by_format[f]) for f in (True, False)) + len(mature_unknown_format_ids)
     write_group_count = len(era_write_groups) + (1 if mature_unknown_format_ids else 0)
 
+    written_word = "would write" if test_mode else "written"
     print(
         f"{name} ({channel_id}): pool shorts={len(pools[True])} long-form={len(pools[False])}; "
         f"current baseline shorts=[{metrics_summary(baselines[True])}] "
         f"long-form=[{metrics_summary(baselines[False])}]; "
-        f"young updated {young_updated} (shorts={len(groups['shorts'])}, long-form={len(groups['long_form'])}, "
+        f"young {written_word} {young_written}, unchanged {young_unchanged} "
+        f"(shorts={len(groups['shorts'])}, long-form={len(groups['long_form'])}, "
         f"unknown-format={len(groups['unknown_format'])})"
     )
     print(
         f"  era: {total_mature} mature video(s) -- 6mo={era_6mo}, 12mo={era_12mo}, "
         f"fallback={era_fallback}, insufficient={era_insufficient}; "
-        f"updated {era_updated} in {write_group_count} write group(s)"
+        f"{written_word} {era_written}, unchanged {era_unchanged}, in {write_group_count} write group(s)"
     )
 
     return dict(
         format_missing=format_missing,
-        young_updated=young_updated, young_insufficient=young_insufficient,
+        young_written=young_written, young_unchanged=young_unchanged, young_insufficient=young_insufficient,
         era_6mo=era_6mo, era_12mo=era_12mo, era_fallback=era_fallback,
-        era_insufficient=era_insufficient, era_updated=era_updated,
+        era_insufficient=era_insufficient, era_written=era_written, era_unchanged=era_unchanged,
     )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Computes the current and era baselines for every channel.")
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Process 5 channels and print what would be written, without touching the database.",
+    )
+    parser.add_argument(
+        "--channel",
+        metavar="CHANNEL_ID",
+        help="Restrict to a single channel, so a result can be checked by hand.",
+    )
+    parser.add_argument(
+        "--era-only",
+        action="store_true",
+        help="Skip writing the current baseline to young videos (step 7's work); still computes "
+             "it in memory, since era videos use it as their fallback.",
+    )
+    parser.add_argument(
+        "--compare-video",
+        metavar="VIDEO_ID",
+        help="Print the video's old stored baseline next to the newly computed one, plus the "
+             "actual pool dates the new median was taken over. Diagnostic only -- combine with "
+             "--test and --channel to check a single video by hand before a real run.",
+    )
+    return parser.parse_args()
+
+
+def run(channel_id=None, test_mode=False, era_only=False, compare_video_id=None, sample_size=None):
+    """Callable core, reused by this script's own CLI main() and by refresh.py. Prints
+    the same per-channel and summary lines either way, and returns the totals dict
+    (including write_failures) rather than deciding what to do about a failure --
+    that's the caller's call: main() exits non-zero, refresh.py treats it as a hard
+    gate before the refresh (NEXT_STEPS.md step 6).
+
+    Raises ValueError if channel_id is given and doesn't exist, so a caller can
+    distinguish "no such channel" from "channel exists but has 0 videos".
+    """
+    channels = fetch_channels(channel_id)
+    if channel_id and not channels:
+        raise ValueError(f"No channel found with channel_id={channel_id}")
+    if sample_size and not channel_id:
+        channels = channels[:sample_size]
+
+    cutoff_180, cutoff_24mo = compute_window_boundaries()
+    print(
+        f"Computing baselines for {len(channels)} channel(s). "
+        f"Mature cutoff: {cutoff_180.isoformat()}. Current-baseline window start: {cutoff_24mo.isoformat()}."
+        + (" Era pass only." if era_only else "")
+        + (" No database writes." if test_mode else ""),
+        flush=True,
+    )
+
+    totals = dict(
+        channels_processed=0, channels_format_missing=0,
+        young_written=0, young_unchanged=0, young_insufficient=0,
+        era_6mo=0, era_12mo=0, era_fallback=0, era_insufficient=0, era_written=0, era_unchanged=0,
+    )
+
+    futures = []
+    with ThreadPoolExecutor(max_workers=WRITE_CONCURRENCY) as executor:
+        for channel in channels:
+            stats = process_channel(
+                channel, cutoff_180, cutoff_24mo, test_mode, era_only, executor, futures,
+                compare_video_id=compare_video_id,
+            )
+            totals["channels_processed"] += 1
+            if stats["format_missing"]:
+                totals["channels_format_missing"] += 1
+            for key in (
+                "young_written", "young_unchanged", "young_insufficient",
+                "era_6mo", "era_12mo", "era_fallback", "era_insufficient", "era_written", "era_unchanged",
+            ):
+                totals[key] += stats[key]
+
+        # Writes were submitted, not awaited, as each channel was processed. Wait for all
+        # of them now, so a write failure (after its own retries) is surfaced here rather
+        # than silently outrun by the script reaching the end.
+        write_failures = 0
+        for future in futures:
+            try:
+                future.result()
+            except Exception as error:
+                write_failures += 1
+                print(f"Write failed: {error}")
+
+    written_word = "would write" if test_mode else "written"
+    print("\n--- Summary ---")
+    if write_failures:
+        print(f"WRITE FAILURES: {write_failures} of {len(futures)} write call(s) failed -- counts below include them as attempted, not confirmed.")
+    print(f"Channels processed: {totals['channels_processed']}")
+    print(f"Channels where a format had no current baseline: {totals['channels_format_missing']}")
+    print(
+        f"Current baseline -- {written_word}: {totals['young_written']}, unchanged: {totals['young_unchanged']}, "
+        f"left insufficient: {totals['young_insufficient']}"
+    )
+    print(
+        f"Era baseline -- 6-month window: {totals['era_6mo']}, 12-month window: {totals['era_12mo']}, "
+        f"fallback to current: {totals['era_fallback']}, insufficient: {totals['era_insufficient']}, "
+        f"{written_word}: {totals['era_written']}, unchanged: {totals['era_unchanged']}"
+    )
+
+    totals["write_failures"] = write_failures
+    return totals
 
 
 def parse_args():
@@ -637,66 +804,19 @@ def parse_args():
 
 def main():
     args = parse_args()
-
-    channels = fetch_channels(args.channel)
-    if args.channel and not channels:
-        print(f"No channel found with channel_id={args.channel}")
+    try:
+        totals = run(
+            channel_id=args.channel,
+            test_mode=args.test,
+            era_only=args.era_only,
+            compare_video_id=args.compare_video,
+            sample_size=TEST_SAMPLE_SIZE if args.test else None,
+        )
+    except ValueError as error:
+        print(str(error))
         return
-    if args.test and not args.channel:
-        channels = channels[:TEST_SAMPLE_SIZE]
 
-    cutoff_180, cutoff_24mo = compute_window_boundaries()
-    print(
-        f"Computing baselines for {len(channels)} channel(s). "
-        f"Mature cutoff: {cutoff_180.isoformat()}. Current-baseline window start: {cutoff_24mo.isoformat()}."
-        + (" Era pass only." if args.era_only else "")
-        + (" No database writes." if args.test else ""),
-        flush=True,
-    )
-
-    totals = dict(
-        channels_processed=0, channels_format_missing=0,
-        young_updated=0, young_insufficient=0,
-        era_6mo=0, era_12mo=0, era_fallback=0, era_insufficient=0, era_updated=0,
-    )
-
-    futures = []
-    with ThreadPoolExecutor(max_workers=WRITE_CONCURRENCY) as executor:
-        for channel in channels:
-            stats = process_channel(
-                channel, cutoff_180, cutoff_24mo, args.test, args.era_only, executor, futures,
-                compare_video_id=args.compare_video,
-            )
-            totals["channels_processed"] += 1
-            if stats["format_missing"]:
-                totals["channels_format_missing"] += 1
-            for key in ("young_updated", "young_insufficient", "era_6mo", "era_12mo", "era_fallback", "era_insufficient", "era_updated"):
-                totals[key] += stats[key]
-
-        # Writes were submitted, not awaited, as each channel was processed. Wait for all
-        # of them now, so a write failure (after its own retries) is surfaced here rather
-        # than silently outrun by the script reaching the end.
-        write_failures = 0
-        for future in futures:
-            try:
-                future.result()
-            except Exception as error:
-                write_failures += 1
-                print(f"Write failed: {error}")
-
-    print("\n--- Summary ---")
-    if write_failures:
-        print(f"WRITE FAILURES: {write_failures} of {len(futures)} write call(s) failed -- counts below include them as attempted, not confirmed.")
-    print(f"Channels processed: {totals['channels_processed']}")
-    print(f"Channels where a format had no current baseline: {totals['channels_format_missing']}")
-    print(f"Current baseline -- videos updated: {totals['young_updated']}, left insufficient: {totals['young_insufficient']}")
-    print(
-        f"Era baseline -- 6-month window: {totals['era_6mo']}, 12-month window: {totals['era_12mo']}, "
-        f"fallback to current: {totals['era_fallback']}, insufficient: {totals['era_insufficient']}, "
-        f"videos updated: {totals['era_updated']}"
-    )
-
-    if write_failures:
+    if totals["write_failures"]:
         sys.exit(1)
 
 
