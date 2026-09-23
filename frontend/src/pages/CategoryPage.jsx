@@ -5,6 +5,7 @@ import { fetchVideos } from '../lib/videos'
 import FilterBar from '../components/FilterBar'
 import VideoGrid from '../components/VideoGrid'
 import ThemeToggle from '../components/ThemeToggle'
+import SuggestChannelButton from '../components/SuggestChannelButton'
 
 // One page, no pagination (NEXT_STEPS.md step 10f): 180 divides cleanly into every
 // column count long-form (1/2/3/4) and Shorts (3/4/5) use, so neither grid ends ragged.
@@ -48,6 +49,7 @@ export default function CategoryPage() {
   const sportsKey = filters.sports.join(',')
   const nosubKey = filters.nosub.join(',')
   const nochanKey = filters.nochan.join(',')
+  const nodurKey = filters.nodur.join(',')
 
   useEffect(() => {
     let cancelled = false
@@ -71,10 +73,10 @@ export default function CategoryPage() {
       cancelled = true
     }
     // filters and categoryDbValues are new references every render; their individual
-    // fields are listed instead (categoriesKey/sportsKey/nosubKey/nochanKey stand in
-    // for the array fields).
+    // fields are listed instead (categoriesKey/sportsKey/nosubKey/nochanKey/nodurKey stand
+    // in for the array fields).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [categoriesKey, filters.metric, filters.comparison, filters.format, filters.date, filters.from, filters.to, sportsKey, nosubKey, nochanKey, filters.q])
+  }, [categoriesKey, filters.metric, filters.comparison, filters.format, filters.date, filters.from, filters.to, sportsKey, nosubKey, nochanKey, nodurKey, filters.q])
 
   const heading = selectedCategories.map((c) => c.displayName).join(' + ')
 
@@ -82,7 +84,10 @@ export default function CategoryPage() {
     <div className="max-w-6xl mx-auto p-6">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">YouTube Endurance Tracker</h1>
-        <ThemeToggle />
+        <div className="flex items-center gap-2">
+          <SuggestChannelButton />
+          <ThemeToggle />
+        </div>
       </div>
 
       <FilterBar categoryState={categoryState} />

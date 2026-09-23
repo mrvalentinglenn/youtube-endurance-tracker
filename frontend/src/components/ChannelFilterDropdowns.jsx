@@ -1,40 +1,18 @@
-import { useEffect, useRef, useState } from 'react'
 import { CATEGORIES } from '../lib/filters'
 import { categoryCheckedCount } from '../lib/channelFilterState'
 import CategoryDropdownPanel from './CategoryDropdownPanel'
 
-// One state slot for which dropdown is open (not one boolean per dropdown) -- five
-// panels able to open independently is exactly the bug this avoids. The open panel
-// renders in-flow below the button row (not floating over the page): simpler and more
-// robust than absolute positioning anchored to one of five buttons, and it naturally
-// satisfies "full-width on small screens" without separate breakpoint logic.
+// Which dropdown is open (one slot, not one boolean per dropdown -- five category panels
+// plus Duration able to open independently is exactly the bug this avoids) is owned by
+// the parent (FilterBar) and passed down as openSlug/onOpenSlugChange, so a category
+// dropdown and the Duration dropdown share the same slot and close each other. The open
+// panel renders in-flow below the button row (not floating over the page): simpler and
+// more robust than absolute positioning anchored to one of several buttons, and it
+// naturally satisfies "full-width on small screens" without separate breakpoint logic.
 //
 // status/tree come from the parent rather than being fetched here, so the one
 // channels_public fetch is shared with ExclusionChips instead of each fetching its own.
-export default function ChannelFilterDropdowns({ status, tree, nosub, nochan, sports, categoryState, onSetNosubNochan }) {
-  const [openSlug, setOpenSlug] = useState(null)
-  const containerRef = useRef(null)
-
-  useEffect(() => {
-    if (!openSlug) return undefined
-
-    function handlePointerDown(e) {
-      if (containerRef.current && !containerRef.current.contains(e.target)) {
-        setOpenSlug(null)
-      }
-    }
-    function handleKeyDown(e) {
-      if (e.key === 'Escape') setOpenSlug(null)
-    }
-
-    document.addEventListener('mousedown', handlePointerDown)
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown)
-      document.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [openSlug])
-
+export default function ChannelFilterDropdowns({ status, tree, nosub, nochan, sports, categoryState, onSetNosubNochan, openSlug, onOpenSlugChange }) {
   if (status === 'error') {
     return (
       <p className="text-sm text-red-600 dark:text-red-400 mb-4">
@@ -49,7 +27,7 @@ export default function ChannelFilterDropdowns({ status, tree, nosub, nochan, sp
   const openBucket = openCategory && tree ? tree.bySlug[openCategory.slug] : null
 
   return (
-    <div ref={containerRef} className="mb-4">
+    <div className="mb-4">
       <div className="flex flex-wrap gap-2">
         {CATEGORIES.map((category) => {
           const isOn = categoryState.isOn(category.slug)
@@ -65,7 +43,7 @@ export default function ChannelFilterDropdowns({ status, tree, nosub, nochan, sp
             <button
               key={category.slug}
               type="button"
-              onClick={() => setOpenSlug(openSlug === category.slug ? null : category.slug)}
+              onClick={() => onOpenSlugChange(openSlug === category.slug ? null : category.slug)}
               disabled={status === 'loading'}
               aria-expanded={openSlug === category.slug}
               className={`px-3 py-1.5 rounded border text-sm disabled:opacity-50 ${

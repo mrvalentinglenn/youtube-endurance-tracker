@@ -65,7 +65,9 @@ publishable key and reads through a database view, never the tables directly. Th
 only in the ingestion environment and never appears anywhere under `frontend/`.
 
 Environment variables: `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` for the front end,
-read via `import.meta.env`, with an explicit error if either is missing. The ingestion scripts use
+read via `import.meta.env`, with an explicit error if either is missing. `VITE_WEB3FORMS_ACCESS_KEY` holds the Web3Forms access key for the channel-suggestion form. It is
+public by design. If it is missing, the suggestion button is hidden and a console warning names the
+variable; the rest of the site keeps working. The ingestion scripts use
 the Supabase secret key, `YOUTUBE_API_KEY`, and `SUPABASE_DB_URL` — a direct Postgres connection
 string through Supabase's Session pooler, used with `psycopg` for anything the REST API cannot do or
 cannot finish in time. All three are stored in GitHub Secrets for the scheduled run and in the root
@@ -117,23 +119,15 @@ in one decisive step.
 computation. The logic lives here and nowhere else.
 - `videos_scored` — a materialised view over `videos_scored_live`, holding every column a card displays. Since step
 10f the front end reads it only in step 2 of the ranking route: fetching the top rows by
-`video_id`. Filtering and sorting happen on `videos_slim` and `videos_search`. Refreshed by the ingestion run, never by the front end. SELECT is granted
-  to `anon` for the front end and to `service_role` so ingestion scripts can verify what the app
-  sees. Sixteen indexes:
-  - unique on `video_id`, required by `REFRESH ... CONCURRENTLY`;
-  - `published_at`, `is_short`, and a GIN index on `fts` for keyword search;
-  - six **category-first** indexes, `(category, is_short, <col> desc nulls last)`, one per sort
-    column. Every query the app sends reads one of these in final order: a single-category ranking
-    touches about 150 pages instead of about 8,000.
-  - six **format-first** indexes, `(is_short, <col> desc nulls last)`. No current query needs them,
-    since merged rankings are fetched per category; they are kept as a cheap fallback, about 12 MB,
-    for any future query without a single-category condition.
-  The sort columns are `views`, `likes`, `comments`, `score_views`, `score_likes` and
-  `score_comments`. `desc nulls last` is written into every definition to match the front end's
-  `nullsFirst: false`; without the match, Postgres sorts on top of the index. There are deliberately
-  no plain single-column sort indexes: every query filters on `is_short`, so they only ever did the
-  same work with twice the walk.   Since step 10f the sort indexes and the `fts` GIN index serve no front-end query; step 10h
-  reviews them for removal.
+`video_id`. Filtering and sorting happen on `videos_slim` and `videos_search`. Refreshed by the
+  ingestion run, never by the front end. SELECT is granted to `anon` for the front end and to
+  `service_role` so ingestion scripts can verify what the app sees. One index: unique on
+  `video_id`. Step 2 fetches by `video_id`, and `REFRESH ... CONCURRENTLY` requires a unique index.
+  The twelve sort indexes, the `published_at` and `is_short` indexes and the GIN index on `fts`
+  were dropped in step 10h, since filtering, sorting and keyword search all run on the slim views.
+  Their definitions are saved in `ingestion/dropped_indexes_10h.sql`. The `fts` column itself
+  stays: `videos_search` copies it from here, so the search expression exists in one place only,
+  `videos_scored_live`.
 
 - `videos_slim` — a materialised view over `videos_scored` holding only what filtering and sorting
   need: `video_id`, `channel_id`, `category`, `subcategory`, the four sport flags, `is_short`,
@@ -386,6 +380,12 @@ Filters the user can combine:
 7. Format: Shorts or long-form. This is a required choice, not an optional filter — the two formats
    are never mixed in one grid, because their thumbnails have different aspect ratios and their view
    scales are not comparable. Default: long-form.
+8. Duration: under 1 min, 1–3, 3–20, 20–45 and 45+ min, a multi-select dropdown on
+   `duration_seconds`. Edges: 1–59 seconds, 60–179, 180–1199, 1200–2699, 2700 and up. Long-form
+   only: under Shorts the dropdown is hidden and the query ignores it, since every Short is 180
+   seconds or less. All buckets on by default; the last one still on cannot be switched off. Videos
+   with an unknown duration (NULL, or 0 from the API's `P0D`) are excluded whenever at least one
+   bucket is off, and shown when all are on. Applied in step 1 only.   
 
 Metric and Comparison together decide the sort order:
 
@@ -399,7 +399,9 @@ Metric and Comparison together decide the sort order:
 | Likes | Relative | Outlier Score against the likes baseline |
 
 Absolute answers "what got the most attention in this sector"; relative answers "what punched above
-its weight". Large channels dominate the first, small channels surface in the second.
+its weight". Large channels dominate the first, small channels surface in the second. Both buttons carry a hover tooltip saying this: Absolute ranks by total views, likes or comments,
+where large channels tend to come out on top; Relative ranks by how far a video outperformed its
+own channel's usual level.
 
 
 
@@ -420,6 +422,9 @@ it off:
 - `nosub` — deselected subcategories.
 - `nochan` — individually deselected channel IDs. IDs, never names: names change when a team's
   sponsor does, and a bookmarked link must not silently stop working.
+`nodur` stores the switched-off duration buckets by key (`u1`, `1-3`, `3-20`, `20-45`, `45+`) and
+is absent when all are on. Under Shorts it stays in the URL but has no effect, so switching back to
+long-form restores it.  
 
 Storing each exclusion at its own level means excluding the Nutrition subcategory also excludes a
 nutrition brand added next month. Checkbox states are always derived from these params, never
@@ -447,11 +452,16 @@ from `channels_public`.
   "Brands › Nutrition ✕", "FloTrack ✕" — with "Clear all" from two chips up.
 - The last category still on cannot be switched off, on either route: its checkbox is disabled.
   Zero categories is a blank page, which reads as broken rather than filtered.
-- One piece of state holds which dropdown is open. Five panels able to open at once is where this
-  breaks.
+- One piece of state holds which dropdown is open, shared by the five category dropdowns and the
+  duration dropdown. Several panels able to open at once is where this breaks.
 - If `channels_public` cannot be fetched, the dropdowns show an error but videos still load, and
   chips fall back to raw subcategory strings and channel IDs rather than disappearing. An active
   exclusion must never become invisible.
+
+**Filter bar layout.** On laptop and wide screens the filter bar has four lines: the five category
+dropdowns; Sport, Published and Duration side by side, with Duration styled exactly like Published
+(label to the left, down-arrow on the button); Metric, Comparison and Format; the keyword search.
+On smaller screens the lines wrap naturally; there is no separate mobile layout.  
 
 Each video card shows: thumbnail, title, channel's avatar and name, **publication date**, views, likes and
 comments. Under Relative it also shows the Outlier Score for the selected metric; under Absolute
@@ -560,6 +570,13 @@ follows the operating system by default, so it is switched to class-based with
 `@custom-variant dark (&:where(.dark, .dark *));` in the CSS entry point. Every element needs a
 dark treatment, not only the background.
 
+**Suggest a channel.** A button in the header, next to the theme toggle, opens a modal with a
+channel name (required, max 100 characters) and a category (required, one of the five, no
+subcategory). It posts to Web3Forms, which emails the suggestion to the owner. There is no server
+and nothing is written to Supabase, so visitors still cannot write to the database. Spam is
+filtered with Web3Forms' `botcheck` honeypot. While sending, the Send button is disabled; on
+failure the input is kept for a retry.
+
 ## Working conventions
 
 - Explain the plan before writing code, and wait for approval on anything that changes the
@@ -595,8 +612,10 @@ longer and has not been re-measured. Refreshes run directly regardless: the gate
 off before. Set a session `statement_timeout` for such
   work. `ingestion/refresh_scoring_view.py` does this for the refresh; its RPC mode was removed on
 2026-09-22.
-- Dropping and recreating `videos_scored` drops its indexes and its grants with it. Recreate all sixteen
-  indexes and reissue SELECT to `anon` and `service_role`, then verify before moving on.
+- Dropping and recreating `videos_scored` drops its unique `video_id` index and its grants with it.
+  Postgres also refuses to drop it while `videos_slim` and `videos_search` depend on it, so those
+  two are dropped and rebuilt with it, with their own ordering, indexes and grants. Recreate
+  everything, reissue SELECT to `anon` and `service_role` on all three, then verify before moving on.
 - `information_schema` does not describe materialised views: it reports no columns and no grants for
   them even when both exist. Check them in the catalog instead — `pg_attribute` for columns,
   `pg_class.relacl` for grants, where `anon=r` means SELECT.

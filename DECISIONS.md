@@ -1482,6 +1482,9 @@ whoever reaches for it next.
 
 ## 2026-09-21 — Category-first sort indexes on videos_scored
 
+**Amended 2026-09-23** by "Unused indexes on videos_scored dropped". All twelve sort indexes were
+dropped in step 10h; their definitions are saved in `ingestion/dropped_indexes_10h.sql`.
+
 **Amended 2026-09-22** by "Rankings filter and sort on a slim, category-ordered copy". No front-end
 query reads these indexes any more; they are up for removal in NEXT_STEPS.md step 10h.
 
@@ -1556,6 +1559,9 @@ would mean adding `video_id` to all twelve sort indexes and rebuilding them — 
 effect visible only in a nearly empty ranking. Left as it is.
 
 ## 2026-09-22 — Step 7d carried out on Pro; the free plan stays open
+
+**Amended 2026-09-23** by "Free plan for the first months after deployment; the fts column stays".
+The free-or-Pro question is settled in outline: free after deployment, paid after that.
 
 **Amended 2026-09-22** by "Rankings filter and sort on a slim, category-ordered copy" and "Keyword
 search runs on its own slim view, on a Search button". The database grew from 294 to 430 MB with the
@@ -1819,3 +1825,103 @@ database went from 294 to 430 MB. Removing what `videos_scored` no longer needs 
 **Open.** A single very common word searched cold, right after a reboot, failed once with a
 "schema cache" error: the API had not finished starting, so the query never ran. Warm it takes
 25 ms. Retest cold once.
+
+## 2026-09-23 — Duration filter: five buckets, long-form only
+
+**Decision.** A multi-select dropdown filters on `duration_seconds` in five buckets: under 1 min
+(1–59 seconds), 1–3 (60–179), 3–20 (180–1199), 20–45 (1200–2699) and 45+ (2700 and up). All on by
+default; the last one still on cannot be switched off. Stored in the URL as `nodur`, the keys of
+the switched-off buckets, following the exclusion pattern. Applied in step 1 only.
+
+**Why.** Paid ad videos are mostly under a minute and almost always under three, so the filter
+gives users a second way to exclude them, next to the paid-promotion note. It also separates two
+kinds of content the grid otherwise mixes: 30-second product spots and full-race broadcasts.
+
+**Why long-form only.** Every Short is 180 seconds or less, so under Shorts only two of the five
+buckets could ever match. Under Shorts the dropdown is hidden and the query ignores `nodur`. The
+param stays in the URL, so switching back to long-form restores it. Otherwise a user who excluded
+the two shortest buckets in long-form and then switched to Shorts would get an empty grid with no
+visible reason.
+
+**Why hidden rather than greyed out.** Slightly simpler to build: a greyed-out control needs a
+tooltip on a wrapper, since disabled buttons fire no hover events, and a tooltip is unreachable on
+touch devices anyway.
+
+**Why a dropdown rather than buttons.** Owner's preference. It follows the pattern of the category
+dropdowns and shares their single open-dropdown state.
+
+**Videos with an unknown duration.** NULL, or 0 from the API's `P0D`, which means unavailable
+rather than zero-length, mostly live streams and premieres. These are excluded whenever at least
+one bucket is switched off: better to leave a video out than to show one that may not fit the
+length the user asked for. With all buckets on, no duration condition applies and they are shown.
+Excluding them even then would remove them from the app entirely, since all on is the default.
+
+## 2026-09-23 — Filter bar rearranged into four lines, with comparison tooltips
+
+**Decision.** On laptop and wide screens: the category dropdowns; Sport, Published and Duration
+side by side, with Duration styled exactly like Published; Metric, Comparison and Format; keyword
+search. On smaller screens the lines wrap naturally. No filter's behaviour changed. Absolute and
+Relative each carry a hover tooltip explaining the difference.
+
+**Why.** Six lines, all aligned left, took a lot of height and left most of the width unused.
+
+**Why the tooltip on Relative does not say "most popular".** Relative does not rank by popularity:
+a small channel's video with 20,000 views can rank above a million-view video. The tooltip says
+how far a video outperformed its channel's usual level, and that a high score "often points to" a
+strong title, thumbnail, topic or video. Hedged, since the paid-promotion cases show a high score
+can also come from advertising.
+
+## 2026-09-23 — Channel suggestions go through Web3Forms
+
+**Decision.** A "Suggest a channel" button in the header opens a modal with a channel name and a
+category, no subcategory. The form posts to Web3Forms, which emails it to the owner. The access key
+is public by design and lives in `VITE_WEB3FORMS_ACCESS_KEY`. Spam is filtered with Web3Forms'
+`botcheck` honeypot. A missing key hides the button without affecting the rest of the site.
+
+**Why.** The site is static, so it cannot send email itself. A form service needs no server and no
+database change.
+
+**Rejected: storing suggestions in Supabase and emailing them via n8n.** It would let anonymous
+visitors write to the database for the first time, where today they can only read, and it adds
+spam handling and one more system to keep running.
+
+**Rejected: a `mailto:` link.** It depends on the visitor having a mail program set up in the
+browser, and when they have none, the suggestion silently never arrives.
+
+## 2026-09-23 — Unused indexes on videos_scored dropped
+
+**Decision.** Fifteen of the sixteen indexes on `videos_scored` were dropped: the twelve sort
+indexes, `published_at`, `is_short` and the GIN index on `fts`. Only the unique index on `video_id`
+remains. Definitions saved in `ingestion/dropped_indexes_10h.sql`, so each can be recreated with
+one statement.
+
+**Why.** Since step 10f, `videos_scored` only serves step 2, fetching rows by `video_id`. A code
+search found three readers: the front end's step 2, and the sentinel and row-count checks in
+`refresh_scoring_view.py`. None needs anything but the `video_id` index. `explain` on a real
+step 2 query confirmed it uses that index and nothing else.
+
+**The one index with a real caller.** `short_score_views_idx` matches a query in
+`compare_baselines.py` exactly. Dropped anyway: that script is a finished one-off from step 8b,
+not part of any scheduled run, and it still works without the index, only slower.
+
+**Measured.** Before: database 430 MB, `videos_scored` 182 MB, of which 59.1 MB indexes. After:
+database 374 MB, `videos_scored` 126 MB, of which 3 MB indexes. The heap is unchanged at 123 MB.
+Plain refresh: `videos_scored` 14.1 seconds, down from about 36; `videos_slim` 3.9;
+`videos_search` 14.2. Row counts match across all three views at 98,557; sentinel matches. Step 2
+still reads only the `video_id` index (586 buffers, against 587 before).
+
+## 2026-09-23 — Free plan for the first months after deployment; the fts column stays
+
+**Decision.** After deployment the project moves to the free plan for roughly 7 to 9 months, then
+to a paid plan. Step 10h part 2, removing the `fts` column from `videos_scored`, is not carried
+out.
+
+**Why.** After part 1 the database is about 374 MB, leaving about 125 MB below the free limit.
+Estimated growth is roughly 13 to 18 MB a month: about 3.8 KB per video across all copies, 2,700 to
+3,500 new videos a month, plus the monthly measurements. That covers the 7 to 9 months. This is an
+estimate; the monthly runs will measure the real figure.
+
+**Why part 2 is not worth it.** It would win about 71 MB, roughly 4 to 5 more months on the free
+plan, which are not needed. It would also mean rebuilding all three views, and `videos_search`
+would have to compute `fts` itself, putting the search expression in a second place, against the
+rule that the logic lives in `videos_scored_live` only.

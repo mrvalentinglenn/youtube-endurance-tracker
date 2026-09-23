@@ -7,12 +7,6 @@ Working document. Tick off what is done and add new questions as they come up.
 - [ ] **Does "last year" work as the default date filter?** Chosen provisionally. Check once real
       data is in the database whether it gives a good first impression.
 
-- [ ] **Free or Pro?** The project is on Pro. The database was 280 MB after step 7d and is 430 MB
-      after step 10f added `videos_slim` (18 MB) and `videos_search` (117 MB), against the free
-      plan's 500 MB. Step 10h is expected to win most of that back. Decide once the entire app is
-      built and deployed. Before deciding: measure the real growth over the monthly runs that have
-      happened by then, and check Supabase's current policy on pausing inactive free projects,
-      since a paused database takes the site down. See DECISIONS.md, 2026-09-22.
 
 - [ ] **A per-channel cutoff for channels onboarded later.** New-video discovery uses the fixed
       floor `BACKFILL_CUTOFF` (2023-09-19). A channel backfilled later gets a later cutoff from
@@ -230,21 +224,31 @@ Working document. Tick off what is done and add new questions as they come up.
          return identical rankings; triathlon loads immediately cold after a reboot. Both slim views
          refresh plain, always, after `videos_scored`, with a row-count check across all three.
          Database 294 → 430 MB. See DECISIONS.md, 2026-09-22.
-10g. [ ] **Video duration filter**, multi-select: under 1 min, 1–3, 3–20, 20–45, 45+ min, on
-         `duration_seconds`, which is already in `videos_slim` and `videos_search`. Rationale: paid
-         ad videos are mostly under a minute and almost always under three, so this gives users
-         another way to exclude them. Since step 10f, the filter is one extra condition in step 1
-         and costs no extra measurement round. Decide first: what the longer buckets mean under
-         Shorts, which are all short; where the videos with no duration go (53 with `P0D` plus
-         NULLs — count them first); and how the URL stores it, following the exclusion pattern.
-10h. [ ] **Slim down `videos_scored`.** Since step 10f it only serves step 2: fetching rows by
-         `video_id`. Its `fts` column, its GIN index and its twelve sort indexes are likely unused
-         now. List what still uses each, then remove what nothing uses, to win back most of the
-         117 MB `videos_search` added. Removing a column means dropping and recreating the view:
-         reissue SELECT to `anon` and `service_role`, recreate the indexes that stay, and verify
-         via `pg_attribute` and `pg_class.relacl`. Matters for the free-plan decision and makes the
-         monthly refresh faster.                    
-11. [ ] **Deploy to Vercel** and add the environment variables there.
+10g. [x] **Video duration filter.** A multi-select dropdown on `duration_seconds`: under 1 min,
+         1–3, 3–20, 20–45 and 45+ min. Long-form only: hidden under Shorts, where the query ignores
+         it but `nodur` stays in the URL. Videos with an unknown duration (NULL or 0) are excluded
+         whenever at least one bucket is off. Applied in step 1 only. See DECISIONS.md, 2026-09-23.
+10h. [x] **Slim down `videos_scored`.** 15 of its 16 indexes dropped; only the unique `video_id`
+         index remains. Definitions saved in `ingestion/dropped_indexes_10h.sql`. Database
+         430 → 374 MB, `videos_scored` 182 → 126 MB. Refresh of `videos_scored` 36 → 14 seconds.
+         Verified in a real browser across all scenarios. The `fts` column stays: removing it
+         would win about 71 MB, not needed for the planned months on the free plan. See
+         DECISIONS.md, 2026-09-23.   
+10i. [x] **Filter bar layout.** Rearranged into four lines on laptop and wide screens: category
+         dropdowns; Sport, Published and Duration; Metric, Comparison and Format; search. Hover
+         tooltips on Absolute and Relative. No filter behaviour changed.
+10j. [x] **Suggest a channel.** A header button opens a modal with a channel name and a category,
+         sent by email through Web3Forms. Access key in `VITE_WEB3FORMS_ACCESS_KEY`. Tested with
+         intercepted requests plus one real submission. See DECISIONS.md, 2026-09-23.                         
+11. [ ] **Deploy to Vercel** and add the environment variables there: `VITE_SUPABASE_URL`,
+        `VITE_SUPABASE_PUBLISHABLE_KEY` and `VITE_WEB3FORMS_ACCESS_KEY`. Afterwards, in the
+        Web3Forms dashboard, replace the form's website URL `localhost` with the real address,
+        and send one test suggestion from the live site.
+11b. [ ] **Move Supabase to the free plan.** Planned for roughly 7 to 9 months, then back to a
+         paid plan. Before switching: check Supabase's current policy on pausing inactive free
+         projects, since a paused database takes the site down, and check that the database
+         (374 MB after step 10h) fits the free limits. After switching: note the database size
+         after each monthly run, to measure the real growth.
 12. [ ] **GitHub Actions workflow.** Schedule `ingestion/refresh.py` monthly, with the keys in
         GitHub Secrets, modelled on the Cycling Content Tracker's workflow. Secrets:
         `YOUTUBE_API_KEY`, the Supabase secret key, `SUPABASE_DB_URL`, and the publishable key for

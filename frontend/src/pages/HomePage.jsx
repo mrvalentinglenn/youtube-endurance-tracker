@@ -3,6 +3,7 @@ import { CATEGORIES, resolveFilters, withParam } from '../lib/filters'
 import FilterBar from '../components/FilterBar'
 import CategorySection from '../components/CategorySection'
 import ThemeToggle from '../components/ThemeToggle'
+import SuggestChannelButton from '../components/SuggestChannelButton'
 
 export default function HomePage() {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -34,7 +35,10 @@ export default function HomePage() {
     <div className="max-w-6xl mx-auto p-6">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">YouTube Endurance Tracker</h1>
-        <ThemeToggle />
+        <div className="flex items-center gap-2">
+          <SuggestChannelButton />
+          <ThemeToggle />
+        </div>
       </div>
 
       <FilterBar categoryState={categoryState} />

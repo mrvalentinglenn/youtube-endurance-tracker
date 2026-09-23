@@ -25,6 +25,19 @@ export const SPORTS = [
   { slug: 'triathlon', column: 'is_triathlon', displayName: 'Triathlon' },
 ]
 
+// Long-form only (NEXT_STEPS.md step 10g) -- Shorts are all short, so the bucket edges
+// would mean nothing there. min/max are in duration_seconds, inclusive on both ends;
+// '45+' has no max. A video with duration_seconds NULL or 0 (the API's P0D, meaning
+// unavailable, not zero-length) matches none of these and is excluded the moment any
+// bucket is switched off, shown again once every bucket is back on.
+export const DURATION_BUCKETS = [
+  { key: 'u1', displayName: 'Under 1 min', min: 1, max: 59 },
+  { key: '1-3', displayName: '1-3 min', min: 60, max: 179 },
+  { key: '3-20', displayName: '3-20 min', min: 180, max: 1199 },
+  { key: '20-45', displayName: '20-45 min', min: 1200, max: 2699 },
+  { key: '45+', displayName: '45+ min', min: 2700, max: null },
+]
+
 export const DATE_OPTIONS = [
   { value: '6m', displayName: 'Last 6 months', months: 6 },
   { value: '1y', displayName: 'Last year', months: 12 },
@@ -45,6 +58,7 @@ export const DEFAULT_FILTERS = {
   nosub: [],
   nochan: [],
   nocat: [],
+  nodur: [],
   q: '',
 }
 
@@ -54,6 +68,7 @@ const VALID_FORMATS = ['longform', 'shorts']
 const VALID_DATES = DATE_OPTIONS.map((d) => d.value)
 const VALID_SPORT_SLUGS = SPORTS.map((s) => s.slug)
 const VALID_CATEGORY_SLUGS = CATEGORIES.map((c) => c.slug)
+const VALID_DURATION_KEYS = DURATION_BUCKETS.map((b) => b.key)
 
 function parseCommaList(raw, allowed) {
   if (!raw) return []
@@ -88,6 +103,7 @@ export function resolveFilters(searchParams) {
     nosub: parseCommaList(searchParams.get('nosub')),
     nochan: parseCommaList(searchParams.get('nochan')),
     nocat: parseCommaList(searchParams.get('nocat'), VALID_CATEGORY_SLUGS),
+    nodur: parseCommaList(searchParams.get('nodur'), VALID_DURATION_KEYS),
     q: searchParams.get('q') || '',
   }
 }

@@ -17,6 +17,7 @@ export default function CategorySection({ category, filters, showMoreSearch }) {
   const sportsKey = filters.sports.join(',')
   const nosubKey = filters.nosub.join(',')
   const nochanKey = filters.nochan.join(',')
+  const nodurKey = filters.nodur.join(',')
 
   useEffect(() => {
     let cancelled = false
@@ -43,9 +44,10 @@ export default function CategorySection({ category, filters, showMoreSearch }) {
     // filters is a resolved plain object, a new reference every render; depending on it
     // directly would refire this on every render regardless of whether any field
     // actually changed. Its individual fields are listed instead (sportsKey/nosubKey/
-    // nochanKey stand in for the array fields, which are also new references every render).
+    // nochanKey/nodurKey stand in for the array fields, which are also new references
+    // every render).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [category.dbValue, filters.metric, filters.comparison, filters.format, filters.date, filters.from, filters.to, sportsKey, nosubKey, nochanKey, filters.q])
+  }, [category.dbValue, filters.metric, filters.comparison, filters.format, filters.date, filters.from, filters.to, sportsKey, nosubKey, nochanKey, nodurKey, filters.q])
 
   return (
     <section className="mb-10 border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden">

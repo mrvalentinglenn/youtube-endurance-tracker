@@ -1,5 +1,5 @@
 import { supabase } from './supabase'
-import { dateRangeFor } from './filters'
+import { DURATION_BUCKETS, dateRangeFor } from './filters'
 import { stripStopwordsForSearch } from './stopwords'
 
 // Every Supabase query detail lives here, for both routes. Neither the homepage sections
@@ -55,6 +55,20 @@ function applyCommonFilters(query, filters) {
 
   if (filters.nochan.length > 0) {
     query = query.not('channel_id', 'in', `(${filters.nochan.map(quoteForInList).join(',')})`)
+  }
+
+  // Long-form only (NEXT_STEPS.md step 10g): Shorts are all short, so the bucket edges
+  // mean nothing there -- the dropdown is hidden and nodur is ignored, though it stays in
+  // the URL so switching back to long-form restores it. With every bucket on, no
+  // condition is added, so a NULL/0 (P0D, unavailable) duration shows exactly as today;
+  // with any bucket off, the OR'd range list excludes them by construction, since no
+  // bucket's range matches NULL or 0.
+  if (filters.format === 'longform' && filters.nodur.length > 0) {
+    const activeBuckets = DURATION_BUCKETS.filter((b) => !filters.nodur.includes(b.key))
+    const clauses = activeBuckets.map((b) =>
+      b.max === null ? `and(duration_seconds.gte.${b.min})` : `and(duration_seconds.gte.${b.min},duration_seconds.lte.${b.max})`
+    )
+    query = query.or(clauses.join(','))
   }
 
   return query
