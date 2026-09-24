@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { closeAllFilterDropdowns } from '../lib/dropdownCoordination'
+import { QuestionMarkIcon } from './icons'
 
 export default function HowItWorksButton() {
   const [isOpen, setIsOpen] = useState(false)
@@ -39,9 +40,12 @@ export default function HowItWorksButton() {
       <button
         type="button"
         onClick={openModal}
-        className="flex items-center gap-1.5 whitespace-nowrap rounded border border-gray-300 dark:border-gray-700 px-2.5 py-1.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800"
+        aria-label="How it works"
+        title="How it works"
+        className="flex items-center justify-center w-10 h-10 rounded border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 md:w-auto md:h-auto md:justify-start md:gap-1.5 md:whitespace-nowrap md:px-2.5 md:py-1.5 md:text-sm"
       >
-        How it works
+        <QuestionMarkIcon className="w-5 h-5 md:hidden" aria-hidden="true" />
+        <span className="hidden md:inline">How it works</span>
       </button>
 
       {isOpen && (

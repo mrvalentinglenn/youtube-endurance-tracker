@@ -35,10 +35,10 @@ export default function ThemeToggle() {
       aria-pressed={theme === 'dark'}
       aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
       title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-      className="flex items-center gap-1.5 rounded border border-gray-300 dark:border-gray-700 px-2.5 py-1.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800"
+      className="flex items-center justify-center w-10 h-10 rounded border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 md:w-auto md:h-auto md:justify-start md:gap-1.5 md:px-2.5 md:py-1.5 md:text-sm"
     >
       {theme === 'dark' ? <MoonIcon /> : <SunIcon />}
-      {theme === 'dark' ? 'Dark' : 'Light'}
+      <span className="hidden md:inline">{theme === 'dark' ? 'Dark' : 'Light'}</span>
     </button>
   )
 }

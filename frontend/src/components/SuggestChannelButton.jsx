@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { CATEGORIES } from '../lib/filters'
 import { closeAllFilterDropdowns } from '../lib/dropdownCoordination'
+import { PlusIcon } from './icons'
 
 const WEB3FORMS_URL = 'https://api.web3forms.com/submit'
 const ACCESS_KEY = import.meta.env.VITE_WEB3FORMS_ACCESS_KEY
@@ -123,9 +124,12 @@ export default function SuggestChannelButton() {
       <button
         type="button"
         onClick={openModal}
-        className="flex items-center gap-1.5 whitespace-nowrap rounded border border-gray-300 dark:border-gray-700 px-2.5 py-1.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800"
+        aria-label="Suggest a channel"
+        title="Suggest a channel"
+        className="flex items-center justify-center w-10 h-10 rounded border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 md:w-auto md:h-auto md:justify-start md:gap-1.5 md:whitespace-nowrap md:px-2.5 md:py-1.5 md:text-sm"
       >
-        Suggest a channel
+        <PlusIcon className="w-5 h-5 md:hidden" aria-hidden="true" />
+        <span className="hidden md:inline">Suggest a channel</span>
       </button>
 
       {isOpen && (

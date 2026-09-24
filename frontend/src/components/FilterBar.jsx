@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { DATE_OPTIONS, SPORTS, categoryBySlug, resolveFilters, withParam } from '../lib/filters'
+import { DATE_OPTIONS, DEFAULT_FILTERS, SPORTS, categoryBySlug, resolveFilters, withParam } from '../lib/filters'
 import { useChannelTree } from '../lib/channelTree'
 import { CLOSE_FILTER_DROPDOWNS_EVENT } from '../lib/dropdownCoordination'
 import ChannelFilterDropdowns from './ChannelFilterDropdowns'
 import DurationDropdown from './DurationDropdown'
 import ExclusionChips from './ExclusionChips'
+import { XIcon } from './icons'
 
 const METRICS = ['views', 'likes', 'comments']
 const COMPARISONS = ['absolute', 'relative']
@@ -184,8 +185,131 @@ export default function FilterBar({ categoryState }) {
     setFilter('q', '', { replace: false })
   }
 
+  // Mobile only (below md): the whole panel (category/subcategory/channel, sport,
+  // published, duration, metric, comparison, format) collapses behind one "Filters"
+  // button and opens as a sheet. q is deliberately left out of the badge count -- the
+  // search box stays visible outside the panel at every width, so there's already a
+  // visible sign of whether a search is active without counting it here too.
+  const [isPanelOpen, setIsPanelOpen] = useState(false)
+
+  const badgeCount = [
+    filters.metric !== DEFAULT_FILTERS.metric,
+    filters.comparison !== DEFAULT_FILTERS.comparison,
+    filters.format !== DEFAULT_FILTERS.format,
+    filters.date !== DEFAULT_FILTERS.date,
+    filters.sports.length > 0,
+    filters.nodur.length > 0,
+    categoryState.offSlugsForChips().length > 0 || filters.nosub.length > 0 || filters.nochan.length > 0,
+  ].filter(Boolean).length
+
+  const summaryLine = `${filters.format === 'longform' ? 'Long-form' : 'Shorts'} · ${label(filters.metric)} · ${label(filters.comparison)}`
+
+  function openPanel() {
+    setIsPanelOpen(true)
+  }
+
+  function closePanel() {
+    setIsPanelOpen(false)
+    setOpenDropdown(null)
+  }
+
+  // Body scroll lock + Escape-to-close while the sheet is open. Only relevant below md
+  // in practice (the Filters button that opens it doesn't exist at md+), but scoped to
+  // isPanelOpen regardless -- harmless if the viewport is ever widened past md while it
+  // happens to be open, since the sheet's own styling falls back to the static desktop
+  // layout at that width anyway.
+  useEffect(() => {
+    if (!isPanelOpen) return undefined
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') closePanel()
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isPanelOpen])
+
+  // If the sheet is ever left open while the viewport crosses back up to md (e.g. a
+  // tablet rotated, or a resize), close it -- otherwise the body scroll lock above would
+  // stay engaged at a width where the "Filters" button (the only way to close it) no
+  // longer exists.
+  useEffect(() => {
+    const mql = window.matchMedia('(min-width: 768px)')
+    function handleChange(e) {
+      if (e.matches) {
+        setIsPanelOpen(false)
+        setOpenDropdown(null)
+      }
+    }
+    mql.addEventListener('change', handleChange)
+    return () => mql.removeEventListener('change', handleChange)
+  }, [])
+
+  const exclusionChipsProps = {
+    extraChips: categoryState.offSlugsForChips().map((slug) => ({
+      key: `nocat:${slug}`,
+      label: `${categoryBySlug(slug).displayName} (off)`,
+      onRemove: () => categoryState.setOn(slug, true),
+    })),
+    nosub: filters.nosub,
+    nochan: filters.nochan,
+    tree,
+    onRemoveNosub: (name) => setNosubNochan(filters.nosub.filter((s) => s !== name), filters.nochan),
+    onRemoveNochan: (id) => setNosubNochan(filters.nosub, filters.nochan.filter((c) => c !== id)),
+    onClearAll: handleClearAllExclusions,
+  }
+
   return (
+    <>
     <div className="mb-8 space-y-4 border border-gray-200 dark:border-gray-800 rounded-lg p-4">
+      {/* Mobile-only backdrop, shown while the sheet below is open. Above the header too
+          (z-40, full-viewport), so the header's icon buttons aren't reachable behind it --
+          tapping anywhere outside the sheet just closes it, like the backdrop everywhere else. */}
+      {isPanelOpen && (
+        <div className="fixed inset-0 z-40 bg-black/40 md:hidden" onClick={closePanel} aria-hidden="true" />
+      )}
+
+      {/* Lines 1-3 (category/subcategory/channel, sport/published/duration,
+          metric/comparison/format): unchanged content and order, one instance. At md+ it's
+          always this exact static block (matching the layout before mobile support existed).
+          Below md it's hidden unless isPanelOpen, in which case it becomes a sheet sliding
+          up from the bottom -- same components, same state, just repositioned. */}
+      <div
+        className={
+          isPanelOpen
+            ? 'fixed inset-x-0 bottom-0 z-50 max-h-[85vh] flex flex-col bg-white dark:bg-gray-900 rounded-t-2xl shadow-lg md:static md:inset-auto md:z-auto md:max-h-none md:flex md:flex-col md:bg-transparent md:dark:bg-transparent md:rounded-none md:shadow-none'
+            : 'hidden md:flex md:flex-col'
+        }
+        {...(isPanelOpen ? { role: 'dialog', 'aria-modal': true, 'aria-labelledby': 'mobile-filters-heading' } : {})}
+      >
+        {isPanelOpen && (
+          <div className="md:hidden flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 shrink-0">
+            <h2 id="mobile-filters-heading" className="text-base font-semibold text-gray-900 dark:text-gray-100">
+              Filters
+            </h2>
+            <button
+              type="button"
+              onClick={closePanel}
+              // If a category/duration dropdown is open, this button sits outside both
+              // refs the document-level mousedown handler checks, so it would otherwise
+              // fire first on mousedown, collapse the dropdown, and -- since the sheet is
+              // bottom-anchored with no fixed height -- shift this header down before the
+              // matching click lands, missing the button entirely. Stopping the mousedown
+              // here leaves this button's own onClick (which already closes any open
+              // dropdown itself, via closePanel) as the only thing that runs.
+              onMouseDown={(e) => e.stopPropagation()}
+              aria-label="Close filters"
+              className="flex items-center justify-center w-10 h-10 -m-2 text-gray-500 dark:text-gray-400"
+            >
+              <XIcon className="w-5 h-5" aria-hidden="true" />
+            </button>
+          </div>
+        )}
+
+      <div className={isPanelOpen ? 'space-y-4 overflow-y-auto p-4' : 'space-y-4 md:space-y-4'}>
       {/* Line 1: category / subcategory / channel */}
       <div ref={categoryDropdownsRef}>
         <span className="text-sm text-gray-700 dark:text-gray-300 block mb-1">Category / subcategory / channel</span>
@@ -201,19 +325,7 @@ export default function FilterBar({ categoryState }) {
           onOpenSlugChange={setOpenDropdown}
         />
 
-        <ExclusionChips
-          extraChips={categoryState.offSlugsForChips().map((slug) => ({
-            key: `nocat:${slug}`,
-            label: `${categoryBySlug(slug).displayName} (off)`,
-            onRemove: () => categoryState.setOn(slug, true),
-          }))}
-          nosub={filters.nosub}
-          nochan={filters.nochan}
-          tree={tree}
-          onRemoveNosub={(name) => setNosubNochan(filters.nosub.filter((s) => s !== name), filters.nochan)}
-          onRemoveNochan={(id) => setNosubNochan(filters.nosub, filters.nochan.filter((c) => c !== id))}
-          onClearAll={handleClearAllExclusions}
-        />
+        <ExclusionChips {...exclusionChipsProps} />
       </div>
 
       {/* Line 2: Sport, Published, Duration, side by side. items-start on the outer row so
@@ -313,8 +425,23 @@ export default function FilterBar({ categoryState }) {
           renderLabel={(v) => (v === 'longform' ? 'Long-form' : 'Shorts')}
         />
       </div>
+      </div>
 
-      {/* Line 4: keyword search */}
+      {isPanelOpen && (
+        <div className="md:hidden shrink-0 p-4 border-t border-gray-200 dark:border-gray-800">
+          <button
+            type="button"
+            onClick={closePanel}
+            onMouseDown={(e) => e.stopPropagation()}
+            className="w-full rounded border border-gray-900 dark:border-gray-100 bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900 py-2 text-sm font-medium"
+          >
+            Show results
+          </button>
+        </div>
+      )}
+      </div>
+
+      {/* Line 4: keyword search -- stays visible outside the panel at every width */}
       <div className="flex items-center gap-2">
         <input
           type="text"
@@ -342,5 +469,27 @@ export default function FilterBar({ categoryState }) {
         )}
       </div>
     </div>
+
+      {/* Mobile only: replaces the whole panel above (except the search line, which
+          stays visible) with one button, a plain-text summary of the current sort, and
+          the exclusion chips -- which must stay visible here regardless of whether the
+          panel is open, so an active exclusion is never hidden. */}
+      <div className="md:hidden mb-8 space-y-3">
+        <button
+          type="button"
+          onClick={openPanel}
+          className="relative inline-flex items-center gap-2 rounded border border-gray-300 dark:border-gray-700 px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800"
+        >
+          Filters
+          {badgeCount > 0 && (
+            <span className="inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900 text-xs font-semibold">
+              {badgeCount}
+            </span>
+          )}
+        </button>
+        <p className="text-sm text-gray-600 dark:text-gray-400">{summaryLine}</p>
+        <ExclusionChips {...exclusionChipsProps} />
+      </div>
+    </>
   )
 }

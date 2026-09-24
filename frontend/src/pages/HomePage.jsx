@@ -2,9 +2,7 @@ import { useSearchParams } from 'react-router-dom'
 import { CATEGORIES, resolveFilters, withParam } from '../lib/filters'
 import FilterBar from '../components/FilterBar'
 import CategorySection from '../components/CategorySection'
-import ThemeToggle from '../components/ThemeToggle'
-import SuggestChannelButton from '../components/SuggestChannelButton'
-import HowItWorksButton from '../components/HowItWorksButton'
+import Header from '../components/Header'
 
 export default function HomePage() {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -34,14 +32,7 @@ export default function HomePage() {
 
   return (
     <div className="max-w-6xl mx-auto p-6">
-      <div className="flex items-center justify-between flex-wrap gap-2 mb-6">
-        <h1 className="text-2xl font-bold">YouTube Endurance Tracker</h1>
-        <div className="flex items-center gap-2">
-          <HowItWorksButton />
-          <SuggestChannelButton />
-          <ThemeToggle />
-        </div>
-      </div>
+      <Header />
 
       <FilterBar categoryState={categoryState} />
 
