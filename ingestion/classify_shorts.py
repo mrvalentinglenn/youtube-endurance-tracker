@@ -38,6 +38,7 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 import requests
 
 from config import supabase
+from retry import with_retry
 from verify_shorts_check import SHORTS_URL, classify
 
 CONCURRENCY = 20  # validated in calibrate_shorts.py: no failures, no drift vs. sequential
@@ -45,8 +46,6 @@ FETCH_PAGE_SIZE = 1000
 REQUEST_TIMEOUT_SECONDS = 10
 WRITE_BATCH_SIZE = 500  # also the progress-log interval
 UPDATE_CHUNK_SIZE = 150  # per .in_() call, to keep the filter URL a safe length
-DB_WRITE_MAX_ATTEMPTS = 3
-DB_WRITE_RETRY_DELAY_SECONDS = 2
 MAX_CONSECUTIVE_FAILURES = 50
 RATIO_WINDOW_SIZE = 1000
 RATIO_DRIFT_THRESHOLD_POINTS = 10
@@ -58,13 +57,14 @@ def fetch_pending_work():
     work = []
     start = 0
     while True:
-        response = (
-            supabase.table("videos")
+        response = with_retry(
+            "videos.select (pending Shorts classification)",
+            lambda start=start: supabase.table("videos")
             .select("video_id, channel_id")
             .is_("is_short", "null")
             .order("video_id")
             .range(start, start + FETCH_PAGE_SIZE - 1)
-            .execute()
+            .execute(),
         )
         rows = response.data
         work.extend((row["video_id"], row["channel_id"]) for row in rows)
@@ -114,18 +114,13 @@ def update_with_retry(is_short, video_ids):
     seen in practice: a Postgres statement timeout on one otherwise-ordinary chunk
     update. Retried here, unlike the YouTube requests: a DB write retry doesn't hide
     anything the abort conditions need to see, since it isn't part of the throttling
-    signal being measured.
+    signal being measured. Uses the shared retry.with_retry helper (transient errors
+    only -- see retry.py) rather than its own loop.
     """
-    last_error = None
-    for attempt in range(1, DB_WRITE_MAX_ATTEMPTS + 1):
-        try:
-            supabase.table("videos").update({"is_short": is_short}).in_("video_id", video_ids).execute()
-            return
-        except Exception as error:
-            last_error = error
-            if attempt < DB_WRITE_MAX_ATTEMPTS:
-                time.sleep(DB_WRITE_RETRY_DELAY_SECONDS)
-    raise last_error
+    with_retry(
+        "videos.update (is_short)",
+        lambda: supabase.table("videos").update({"is_short": is_short}).in_("video_id", video_ids).execute(),
+    )
 
 
 def flush_batch(shorts_ids, long_form_ids):

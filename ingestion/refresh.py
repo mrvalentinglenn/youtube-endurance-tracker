@@ -77,6 +77,7 @@ from backfill import (
 )
 from classify_shorts import fetch_pending_work, make_session, process_queue, send_request
 from config import YOUTUBE_API_KEY, supabase
+from retry import is_transient_youtube, with_retry
 from verify_shorts_check import classify
 
 YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
@@ -137,11 +138,12 @@ def fetch_channels_for_refresh():
     """Channels eligible for the refresh: last_checked_at is set, i.e. already
     backfilled. Returns (eligible, skipped) -- skipped channels are reported, not
     silently dropped."""
-    response = (
-        supabase.table("channels")
+    response = with_retry(
+        "channels.select (refresh eligibility)",
+        lambda: supabase.table("channels")
         .select("channel_id, name, uploads_playlist_id, last_checked_at")
         .order("name")
-        .execute()
+        .execute(),
     )
     all_channels = response.data
     eligible = [c for c in all_channels if c["last_checked_at"] is not None]
@@ -155,13 +157,17 @@ def fetch_channel_metadata(channel_ids, quota):
     result, same as sync_avatars.fetch_thumbnails."""
     metadata = {}
     for batch in chunked(channel_ids, CHANNELS_BATCH_SIZE):
-        response = requests.get(YOUTUBE_CHANNELS_URL, params={
-            "part": "snippet,statistics",
-            "id": ",".join(batch),
-            "maxResults": CHANNELS_BATCH_SIZE,
-            "key": YOUTUBE_API_KEY,
-        })
-        response.raise_for_status()
+        def call(batch=batch):
+            response = requests.get(YOUTUBE_CHANNELS_URL, params={
+                "part": "snippet,statistics",
+                "id": ",".join(batch),
+                "maxResults": CHANNELS_BATCH_SIZE,
+                "key": YOUTUBE_API_KEY,
+            })
+            response.raise_for_status()
+            return response
+
+        response = with_retry("channels.list (metadata)", call, is_transient=is_transient_youtube)
         quota.add(1, "channels.list (metadata)")
         for item in response.json().get("items", []):
             stats = item.get("statistics", {})
@@ -182,7 +188,13 @@ def update_channel_metadata(channels, metadata, test_mode):
             not_found.append(channel)
             continue
         if not test_mode:
-            supabase.table("channels").update(info).eq("channel_id", channel["channel_id"]).execute()
+            with_retry(
+                "channels.update (metadata)",
+                lambda info=info, channel=channel: supabase.table("channels")
+                .update(info)
+                .eq("channel_id", channel["channel_id"])
+                .execute(),
+            )
         updated += 1
     return updated, not_found
 
@@ -193,13 +205,14 @@ def fetch_known_video_ids(channel_id):
     ids = set()
     start = 0
     while True:
-        response = (
-            supabase.table("videos")
+        response = with_retry(
+            "videos.select (known video ids)",
+            lambda start=start: supabase.table("videos")
             .select("video_id")
             .eq("channel_id", channel_id)
             .order("video_id")
             .range(start, start + FETCH_PAGE_SIZE - 1)
-            .execute()
+            .execute(),
         )
         rows = response.data
         ids.update(r["video_id"] for r in rows)
@@ -234,8 +247,12 @@ def discover_new_video_ids(uploads_playlist_id, known_ids, quota):
         if page_token:
             params["pageToken"] = page_token
 
-        response = requests.get(YOUTUBE_PLAYLIST_ITEMS_URL, params=params)
-        response.raise_for_status()
+        def call(params=params):
+            response = requests.get(YOUTUBE_PLAYLIST_ITEMS_URL, params=params)
+            response.raise_for_status()
+            return response
+
+        response = with_retry("playlistItems.list (new-video discovery)", call, is_transient=is_transient_youtube)
         quota.add(1, "playlistItems.list (new-video discovery)")
         pages += 1
         data = response.json()
@@ -340,10 +357,13 @@ def fetch_young_videos(channel_ids=None):
     videos = {}
     start = 0
     while True:
-        query = supabase.table("videos").select("video_id, published_at, channel_id").gte("published_at", cutoff)
-        if channel_ids:
-            query = query.in_("channel_id", channel_ids)
-        response = query.order("video_id").range(start, start + FETCH_PAGE_SIZE - 1).execute()
+        def run_query(start=start):
+            query = supabase.table("videos").select("video_id, published_at, channel_id").gte("published_at", cutoff)
+            if channel_ids:
+                query = query.in_("channel_id", channel_ids)
+            return query.order("video_id").range(start, start + FETCH_PAGE_SIZE - 1).execute()
+
+        response = with_retry("videos.select (young videos)", run_query)
         rows = response.data
         for row in rows:
             videos[row["video_id"]] = datetime.fromisoformat(row["published_at"].replace("Z", "+00:00"))
@@ -366,13 +386,17 @@ def remeasure_young_videos(young_videos, quota, test_mode, today):
     missing = []
 
     for batch in chunked(video_ids, API_BATCH_SIZE):
-        response = requests.get(YOUTUBE_VIDEOS_URL, params={
-            "part": "statistics",
-            "id": ",".join(batch),
-            "maxResults": API_BATCH_SIZE,
-            "key": YOUTUBE_API_KEY,
-        })
-        response.raise_for_status()
+        def call(batch=batch):
+            response = requests.get(YOUTUBE_VIDEOS_URL, params={
+                "part": "statistics",
+                "id": ",".join(batch),
+                "maxResults": API_BATCH_SIZE,
+                "key": YOUTUBE_API_KEY,
+            })
+            response.raise_for_status()
+            return response
+
+        response = with_retry("videos.list (re-measurement)", call, is_transient=is_transient_youtube)
         quota.add(1, "videos.list (re-measurement)")
 
         items = response.json().get("items", [])
@@ -399,12 +423,22 @@ def remeasure_young_videos(young_videos, quota, test_mode, today):
 
         if len(stats_chunk) >= WRITE_CHUNK_SIZE:
             if not test_mode:
-                supabase.table("video_stats").upsert(stats_chunk, on_conflict="video_id,captured_at").execute()
+                with_retry(
+                    "video_stats.upsert (re-measurement)",
+                    lambda chunk=stats_chunk: supabase.table("video_stats")
+                    .upsert(chunk, on_conflict="video_id,captured_at")
+                    .execute(),
+                )
             stats_chunk = []
 
     if stats_chunk:
         if not test_mode:
-            supabase.table("video_stats").upsert(stats_chunk, on_conflict="video_id,captured_at").execute()
+            with_retry(
+                "video_stats.upsert (re-measurement)",
+                lambda chunk=stats_chunk: supabase.table("video_stats")
+                .upsert(chunk, on_conflict="video_id,captured_at")
+                .execute(),
+            )
 
     if missing:
         print(f"  {len(missing)} video(s) no longer available (deleted or private), skipped: {missing[:10]}"
@@ -517,7 +551,10 @@ def run(test_mode=False, concurrent_refresh=False, refresh_timeout_minutes=REFRE
     quota = QuotaTracker()
     today = datetime.now(timezone.utc).date()
 
-    videos_before = supabase.table("videos").select("video_id", count="exact").limit(1).execute().count
+    videos_before = with_retry(
+        "videos.select (row count, before)",
+        lambda: supabase.table("videos").select("video_id", count="exact").limit(1).execute(),
+    ).count
     print(f"Starting refresh. videos row count before: {videos_before}."
           + (" --test: 5 channels, real API calls, no writes, no refresh." if test_mode else ""),
           flush=True)
@@ -641,7 +678,10 @@ def run(test_mode=False, concurrent_refresh=False, refresh_timeout_minutes=REFRE
 
     # --- Checks ---
     print(f"\n--- Checks ---", flush=True)
-    videos_after = supabase.table("videos").select("video_id", count="exact").limit(1).execute().count
+    videos_after = with_retry(
+        "videos.select (row count, after)",
+        lambda: supabase.table("videos").select("video_id", count="exact").limit(1).execute(),
+    ).count
     print(f"  videos row count: {videos_before} -> {videos_after}")
 
     if failure is None:

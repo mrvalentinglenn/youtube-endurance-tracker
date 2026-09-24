@@ -58,6 +58,7 @@ import psycopg
 from supabase import create_client
 
 from config import SUPABASE_DB_URL, supabase
+from retry import with_retry
 
 DIRECT_STATEMENT_TIMEOUT_MINUTES = 30
 FRONTEND_ENV_PATH = Path(__file__).resolve().parent.parent / "frontend" / ".env"
@@ -124,8 +125,14 @@ def verify_sentinel(anon_client, video_id):
     Rather than recomputing score_views ourselves (duplicating the view's own division
     and its zero guard), this fetches both rows and reports them side by side so a human
     can see whether the view is now serving the new baseline."""
-    video = supabase.table("videos").select("video_id, baseline_views").eq("video_id", video_id).execute().data
-    scored = anon_client.table("videos_scored").select("video_id, views, score_views").eq("video_id", video_id).execute().data
+    video = with_retry(
+        "videos.select (sentinel)",
+        lambda: supabase.table("videos").select("video_id, baseline_views").eq("video_id", video_id).execute(),
+    ).data
+    scored = with_retry(
+        "videos_scored.select (sentinel, anon)",
+        lambda: anon_client.table("videos_scored").select("video_id, views, score_views").eq("video_id", video_id).execute(),
+    ).data
 
     if not video or not scored:
         print(f"  {video_id}: not found in videos and/or videos_scored -- cannot verify")
@@ -157,10 +164,16 @@ def verify_row_counts_match(anon_client):
     column subsets of videos_scored -- so all three row counts must always be equal. A
     mismatch means one refresh silently ran on stale data or didn't complete, the one
     failure mode a materialised view gives no other signal for."""
-    scored_count = anon_client.table("videos_scored").select("video_id", count="exact").limit(1).execute().count
+    scored_count = with_retry(
+        "videos_scored.select (row count, anon)",
+        lambda: anon_client.table("videos_scored").select("video_id", count="exact").limit(1).execute(),
+    ).count
     counts = {"videos_scored": scored_count}
     for view_name in SLIM_VIEWS:
-        counts[view_name] = anon_client.table(view_name).select("video_id", count="exact").limit(1).execute().count
+        counts[view_name] = with_retry(
+            f"{view_name}.select (row count, anon)",
+            lambda view_name=view_name: anon_client.table(view_name).select("video_id", count="exact").limit(1).execute(),
+        ).count
 
     matches = all(count == scored_count for count in counts.values())
     counts_str = ", ".join(f"{name}: {count}" for name, count in counts.items())

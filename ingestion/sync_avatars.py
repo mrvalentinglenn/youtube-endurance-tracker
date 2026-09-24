@@ -19,9 +19,12 @@ NULL on the proposed insert row before checking for a conflict, so a partial pay
 
 A failed download, a non-200 response, or a failed upload skips that channel without
 calling .update() -- a stale avatar beats a broken image, and beats overwriting a working
-URL with nothing. No retries: one failure is logged and the run moves on. A channel whose
-API response has no thumbnail at all is also skipped, not written as NULL -- a missing
-avatar is an absence, not a recorded fact.
+URL with nothing. The download itself has no retry: one failure there is logged and the
+run moves on. The Supabase calls (the Storage upload and the channels.update) go through
+the shared retry.with_retry helper, so a transient network error gets a few attempts
+before that same "log and move on" behaviour kicks in -- a channel's avatar still never
+fails the run. A channel whose API response has no thumbnail at all is also skipped, not
+written as NULL -- a missing avatar is an absence, not a recorded fact.
 
 Usage:
     python sync_avatars.py            # writes to the database and to Storage
@@ -40,6 +43,7 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 import requests
 
 from config import YOUTUBE_API_KEY, supabase
+from retry import is_transient_youtube, with_retry
 
 YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 BUCKET_NAME = "channel-avatars"
@@ -62,12 +66,13 @@ def fetch_channels():
     channels = []
     start = 0
     while True:
-        response = (
-            supabase.table("channels")
+        response = with_retry(
+            "channels.select (avatars)",
+            lambda start=start: supabase.table("channels")
             .select("channel_id, name")
             .order("channel_id")
             .range(start, start + FETCH_PAGE_SIZE - 1)
-            .execute()
+            .execute(),
         )
         rows = response.data
         channels.extend(rows)
@@ -84,13 +89,17 @@ def fetch_thumbnails(channel_ids):
     quota_used = 0
 
     for batch in chunked(channel_ids, BATCH_SIZE):
-        response = requests.get(YOUTUBE_CHANNELS_URL, params={
-            "part": "snippet",
-            "id": ",".join(batch),
-            "maxResults": BATCH_SIZE,
-            "key": YOUTUBE_API_KEY,
-        })
-        response.raise_for_status()
+        def call(batch=batch):
+            response = requests.get(YOUTUBE_CHANNELS_URL, params={
+                "part": "snippet",
+                "id": ",".join(batch),
+                "maxResults": BATCH_SIZE,
+                "key": YOUTUBE_API_KEY,
+            })
+            response.raise_for_status()
+            return response
+
+        response = with_retry("channels.list (avatar thumbnails)", call, is_transient=is_transient_youtube)
         quota_used += QUOTA_COST_PER_CALL
 
         for item in response.json().get("items", []):
@@ -139,11 +148,17 @@ def sync_channel(channel, thumbnails, test_mode):
         }
 
     try:
-        supabase.storage.from_(BUCKET_NAME).upload(
-            storage_path, image_bytes, file_options={"content-type": "image/jpeg", "upsert": "true"}
+        with_retry(
+            "storage.upload (avatar)",
+            lambda: supabase.storage.from_(BUCKET_NAME).upload(
+                storage_path, image_bytes, file_options={"content-type": "image/jpeg", "upsert": "true"}
+            ),
         )
         public_url = supabase.storage.from_(BUCKET_NAME).get_public_url(storage_path)
-        supabase.table("channels").update({"avatar_url": public_url}).eq("channel_id", channel_id).execute()
+        with_retry(
+            "channels.update (avatar_url)",
+            lambda: supabase.table("channels").update({"avatar_url": public_url}).eq("channel_id", channel_id).execute(),
+        )
     except Exception as error:
         return {"status": "failed", "channel": channel, "reason": f"upload/write failed: {error}"}
 

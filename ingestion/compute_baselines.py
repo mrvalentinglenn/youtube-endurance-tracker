@@ -75,7 +75,6 @@ a fresh query.
 import argparse
 import calendar
 import sys
-import time
 from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -92,6 +91,7 @@ import threading
 from supabase import create_client
 
 from config import SUPABASE_SECRET_KEY, SUPABASE_URL, supabase
+from retry import with_retry
 
 _thread_local = threading.local()
 
@@ -113,8 +113,6 @@ def get_write_client():
 FETCH_PAGE_SIZE = 1000
 STATS_FETCH_CHUNK_SIZE = 150  # video_ids per .in_() call when fetching video_stats
 UPDATE_CHUNK_SIZE = 150  # video_ids per .in_() call when writing baselines back
-DB_WRITE_MAX_ATTEMPTS = 3
-DB_WRITE_RETRY_DELAY_SECONDS = 2
 TEST_SAMPLE_SIZE = 5
 WRITE_CONCURRENCY = 10  # era writes can't collapse into one call per format like step 7's;
                         # 77,613 mature videos means tens of thousands of write calls
@@ -156,10 +154,13 @@ def chunked(items, size):
 
 
 def fetch_channels(channel_id=None):
-    query = supabase.table("channels").select("channel_id, name").order("name")
-    if channel_id:
-        query = query.eq("channel_id", channel_id)
-    return query.execute().data
+    def run_query():
+        query = supabase.table("channels").select("channel_id, name").order("name")
+        if channel_id:
+            query = query.eq("channel_id", channel_id)
+        return query.execute()
+
+    return with_retry("channels.select (baselines)", run_query).data
 
 
 def fetch_channel_videos(channel_id):
@@ -172,8 +173,9 @@ def fetch_channel_videos(channel_id):
     videos = []
     start = 0
     while True:
-        response = (
-            supabase.table("videos")
+        response = with_retry(
+            "videos.select (channel videos for baselines)",
+            lambda start=start: supabase.table("videos")
             .select(
                 "video_id, published_at, is_short, "
                 "baseline_views, baseline_likes, baseline_comments, baseline_kind"
@@ -181,7 +183,7 @@ def fetch_channel_videos(channel_id):
             .eq("channel_id", channel_id)
             .order("video_id")
             .range(start, start + FETCH_PAGE_SIZE - 1)
-            .execute()
+            .execute(),
         )
         rows = response.data
         for row in rows:
@@ -200,13 +202,14 @@ def fetch_latest_stats(video_ids):
     for id_chunk in chunked(video_ids, STATS_FETCH_CHUNK_SIZE):
         start = 0
         while True:
-            response = (
-                supabase.table("video_stats")
+            response = with_retry(
+                "video_stats.select (latest stats for baselines)",
+                lambda start=start: supabase.table("video_stats")
                 .select("video_id, captured_at, views, likes, comments")
                 .in_("video_id", id_chunk)
                 .order("id")
                 .range(start, start + FETCH_PAGE_SIZE - 1)
-                .execute()
+                .execute(),
             )
             rows = response.data
             for row in rows:
@@ -373,19 +376,14 @@ def compute_era_baseline(video, sorted_pool, dates, cutoff_180, current_baseline
 
 
 def update_with_retry(payload, video_ids):
-    """A real UPDATE, not an upsert -- see the module docstring. Retried: a run touching
-    all 342 channels is long enough to hit the occasional transient DB error, as
+    """A real UPDATE, not an upsert -- see the module docstring. Retried via the shared
+    retry.with_retry helper (transient errors only -- see retry.py): a run touching all
+    342 channels is long enough to hit the occasional transient DB error, as
     classify_shorts.py did in practice."""
-    last_error = None
-    for attempt in range(1, DB_WRITE_MAX_ATTEMPTS + 1):
-        try:
-            get_write_client().table("videos").update(payload).in_("video_id", video_ids).execute()
-            return
-        except Exception as error:
-            last_error = error
-            if attempt < DB_WRITE_MAX_ATTEMPTS:
-                time.sleep(DB_WRITE_RETRY_DELAY_SECONDS)
-    raise last_error
+    with_retry(
+        "videos.update (baselines)",
+        lambda: get_write_client().table("videos").update(payload).in_("video_id", video_ids).execute(),
+    )
 
 
 def numeric_equal(existing, computed):

@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 import requests
 
 from config import YOUTUBE_API_KEY, supabase
+from retry import is_transient_youtube, with_retry
 
 YOUTUBE_PLAYLIST_ITEMS_URL = "https://www.googleapis.com/youtube/v3/playlistItems"
 YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
@@ -125,8 +126,12 @@ def collect_video_ids_in_window(uploads_playlist_id, cutoff):
         if page_token:
             params["pageToken"] = page_token
 
-        response = requests.get(YOUTUBE_PLAYLIST_ITEMS_URL, params=params)
-        response.raise_for_status()
+        def call(params=params):
+            response = requests.get(YOUTUBE_PLAYLIST_ITEMS_URL, params=params)
+            response.raise_for_status()
+            return response
+
+        response = with_retry("playlistItems.list (backfill)", call, is_transient=is_transient_youtube)
         quota_used += QUOTA_COST_PER_CALL
         data = response.json()
 
@@ -160,13 +165,17 @@ def collect_video_ids_in_window(uploads_playlist_id, cutoff):
 
 def fetch_video_details(video_ids):
     """Calls videos.list for one batch. Returns (items, quota_used)."""
-    response = requests.get(YOUTUBE_VIDEOS_URL, params={
-        "part": "snippet,contentDetails,statistics",
-        "id": ",".join(video_ids),
-        "maxResults": BATCH_SIZE,
-        "key": YOUTUBE_API_KEY,
-    })
-    response.raise_for_status()
+    def call():
+        response = requests.get(YOUTUBE_VIDEOS_URL, params={
+            "part": "snippet,contentDetails,statistics",
+            "id": ",".join(video_ids),
+            "maxResults": BATCH_SIZE,
+            "key": YOUTUBE_API_KEY,
+        })
+        response.raise_for_status()
+        return response
+
+    response = with_retry("videos.list (backfill details)", call, is_transient=is_transient_youtube)
     return response.json().get("items", []), QUOTA_COST_PER_CALL
 
 
@@ -222,9 +231,15 @@ def build_records(item, channel_id, today):
 def flush_chunk(video_chunk, stats_chunk):
     """Writes videos before video_stats: video_stats has a foreign key to videos."""
     if video_chunk:
-        supabase.table("videos").upsert(video_chunk, on_conflict="video_id").execute()
+        with_retry(
+            "videos.upsert (backfill)",
+            lambda: supabase.table("videos").upsert(video_chunk, on_conflict="video_id").execute(),
+        )
     if stats_chunk:
-        supabase.table("video_stats").upsert(stats_chunk, on_conflict="video_id,captured_at").execute()
+        with_retry(
+            "video_stats.upsert (backfill)",
+            lambda: supabase.table("video_stats").upsert(stats_chunk, on_conflict="video_id,captured_at").execute(),
+        )
 
 
 def process_channel(channel, cutoff, test_mode):
