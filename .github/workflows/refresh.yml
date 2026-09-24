@@ -54,6 +54,33 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Healthchecks.io monitoring: /start before the real run, then either a plain ping
+      # (success) or /fail (failure or cancellation) after. Skipped entirely in test mode
+      # -- a test run must never count as a real refresh -- and skipped with a log
+      # warning, not a failure, if the secret was never configured. None of the ping
+      # steps can affect the job's own result: continue-on-error: true, and curl's own
+      # timeout/retries keep a slow or unreachable healthcheck endpoint from ever being
+      # the reason this job is slow or red.
+      - name: Check for Healthchecks.io ping URL
+        if: inputs.test_mode != true
+        id: healthcheck
+        env:
+          PING_URL: ${{ secrets.HEALTHCHECK_PING_URL }}
+        run: |
+          if [ -z "$PING_URL" ]; then
+            echo "::warning::HEALTHCHECK_PING_URL is not set -- skipping Healthchecks.io pings for this run."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ping Healthchecks.io (start)
+        if: inputs.test_mode != true && steps.healthcheck.outputs.enabled == 'true'
+        continue-on-error: true
+        env:
+          PING_URL: ${{ secrets.HEALTHCHECK_PING_URL }}
+        run: curl -fsS -m 10 --retry 3 "$PING_URL/start"
+
       - name: Run the 30-day refresh
         env:
           # Read from GitHub's encrypted secret store at run time, never hardcoded here.
@@ -81,3 +108,17 @@ jobs:
           else
             python refresh.py
           fi
+
+      - name: Ping Healthchecks.io (success)
+        if: inputs.test_mode != true && steps.healthcheck.outputs.enabled == 'true' && success()
+        continue-on-error: true
+        env:
+          PING_URL: ${{ secrets.HEALTHCHECK_PING_URL }}
+        run: curl -fsS -m 10 --retry 3 "$PING_URL"
+
+      - name: Ping Healthchecks.io (failure)
+        if: inputs.test_mode != true && steps.healthcheck.outputs.enabled == 'true' && (failure() || cancelled())
+        continue-on-error: true
+        env:
+          PING_URL: ${{ secrets.HEALTHCHECK_PING_URL }}
+        run: curl -fsS -m 10 --retry 3 "$PING_URL/fail"
