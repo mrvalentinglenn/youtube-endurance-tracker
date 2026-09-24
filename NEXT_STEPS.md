@@ -291,13 +291,15 @@ Working document. Tick off what is done and add new questions as they come up.
         1 day). `refresh.yml` pings `/start` before the run and the plain URL or `/fail` after it,
         from the secret `HEALTHCHECK_PING_URL`; test-mode runs send no ping. Verified with a real
         run on 2026-09-24: started 11:36, OK 11:53, check up.
-12b. [ ] **Daily Shorts reclassify workflow.** A short script selecting videos with `is_short`
-        NULL, re-running the HEAD check and writing back the result. Scheduled daily via GitHub
-        Actions. Same script as backfill phase two (`ingestion/classify_shorts.py`). This is also
-        what makes NULL-format videos visible in the app again: the format filter is a required
-        choice, so a video with no format matches neither side and is unreachable until this job
-        resolves it. See DECISIONS.md, 2026-09-20.         The runner check of step 12 covers it: the HEAD check works from GitHub's runners.
-        `fetch_pending_work()` orders on `video_id` and its reads now retry transient errors.         When it is built, give it its own Healthchecks.io check, following step 12's pattern.
+12b. [x] **Daily Shorts reclassify workflow.** `.github/workflows/reclassify-shorts.yml` runs
+         `ingestion/classify_shorts.py` over videos with `is_short` NULL, daily at 05:00 UTC,
+         plus a manual trigger whose `test_mode` defaults to true. It makes NULL-format videos
+         visible in the app again, since the format filter is a required choice. With nothing
+         pending it exits at once. An abort on one of the script's guards (a 429, 50 consecutive
+         failures, the drift guard) fails the job. `classify_shorts.py` gained a `--test` mode:
+         real HEAD checks on 5 videos, no writes. Monitored by its own Healthchecks.io check
+         (`0 5 * * *`, UTC, grace 6 hours), from the secret `HEALTHCHECK_RECLASSIFY_PING_URL`.
+         See DECISIONS.md, 2026-09-24.
 13. [x] **Polish for the portfolio.**
 13a. [x] **"How it works" button.** In the header, left of "Suggest a channel", opening a modal
          with three short paragraphs: what the tracker covers, the 180-day freeze, and Absolute

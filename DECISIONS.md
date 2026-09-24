@@ -2094,3 +2094,28 @@ change had to be made twice, which is how two pages drift apart.
 button: the document-level "click outside" handler ran on `mousedown`, closed the dropdown and
 shifted the sheet before the `click` landed. Fixed by stopping `mousedown` on the close and
 "Show results" buttons.
+
+## 2026-09-24 — The daily Shorts reclassify job
+
+**Decision.** `reclassify-shorts.yml` runs `classify_shorts.py` daily at 05:00 UTC over videos with
+`is_short` NULL. Its manual trigger defaults to test mode. An abort on one of the script's guards
+fails the job. It has its own Healthchecks.io check, grace 6 hours.
+
+**Why daily.** A video whose Shorts check fails matches neither side of the required format
+filter, so it is invisible in the app. Without this job it would stay invisible until the next
+monthly run.
+
+**Why 05:00 UTC.** On the 22nd the monthly run starts at 03:00 and takes about 15 minutes, so the
+two jobs never overlap.
+
+**Why test mode by default on a manual run.** An accidental click never writes anything. The
+scheduled run passes no inputs and always runs for real.
+
+**Why an abort fails the job.** A 429 or a drift-guard trip means the HEAD check stopped
+answering reliably. That deserves a red run and an email, even though the videos simply stay NULL
+and are retried the next day.
+
+**Why a grace time of 6 hours.** A daily job that starts a few hours late is not worth an alert.
+
+**Also.** `classify_shorts.py` had no `--test` mode, against CLAUDE.md's rule for every script. It
+gained one: real HEAD checks on 5 pending videos, no writes, counts labelled "would write".

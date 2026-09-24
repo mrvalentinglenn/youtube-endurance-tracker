@@ -64,7 +64,10 @@ Same stack as the Cycling Content Tracker, so the owner stays on familiar ground
   there.   The monthly run is monitored by Healthchecks.io: `refresh.yml` pings `/start` before the run and
   the plain URL or `/fail` after it, skipping all pings in test mode. A ping never changes the
   job's outcome. The check alerts by email on a failure, and a day after the 22nd if no run
-  happened at all, which GitHub itself never reports.
+  happened at all, which GitHub itself never reports.   `.github/workflows/reclassify-shorts.yml` runs daily at 05:00 UTC and re-checks every video with
+  `is_short` NULL, with its own Healthchecks.io check. It needs only `SUPABASE_URL`,
+  `SUPABASE_SECRET_KEY` and `YOUTUBE_API_KEY`, the last because `config.py` requires it at import.
+  Its manual trigger defaults to test mode.
 
 **Key handling, following the pattern of the Cycling Content Tracker.** The front end uses only the
 publishable key and reads through a database view, never the tables directly. The secret key exists
@@ -80,7 +83,8 @@ The sentinel check in `refresh_scoring_view.py` also reads as `anon`, using `VIT
 `VITE_SUPABASE_PUBLISHABLE_KEY` from the environment first and from `frontend/.env` otherwise.
 Manual runs read the root `.env`. The scheduled run reads five GitHub Secrets: `SUPABASE_URL`,
 `SUPABASE_SECRET_KEY`, `SUPABASE_DB_URL`, `YOUTUBE_API_KEY` and `SUPABASE_PUBLISHABLE_KEY`; the
-workflow maps the last two to the `VITE_` names. A sixth secret, `HEALTHCHECK_PING_URL`, holds the Healthchecks.io ping URL. The connection string contains the database password: a `@` or other
+workflow maps the last two to the `VITE_` names. Two more secrets hold Healthchecks.io ping URLs: `HEALTHCHECK_PING_URL` for the monthly run and
+`HEALTHCHECK_RECLASSIFY_PING_URL` for the daily one. The connection string contains the database password: a `@` or other
 reserved character in it must be percent-encoded (`@` becomes `%40`).
 
 `.gitignore` must exclude `.env*`, `node_modules`, `__pycache__`, and any spreadsheet working copies
