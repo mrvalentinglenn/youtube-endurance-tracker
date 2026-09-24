@@ -51,7 +51,7 @@ export const DEFAULT_FILTERS = {
   metric: 'views',
   comparison: 'absolute',
   format: 'longform',
-  date: '1y',
+  date: 'all',
   from: '',
   to: '',
   sports: [],
