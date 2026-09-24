@@ -1,0 +1,47 @@
+name: Check Shorts HEAD check from runner
+
+# Manual only -- this is a one-off (and occasionally repeated) diagnostic, not a
+# scheduled job. Its whole purpose is answering "does the Shorts HEAD check still work
+# from here": the check relies on getting no regional GDPR consent redirect
+# (DECISIONS.md, 2026-09-18), and that's a property of where the request comes from, not
+# of the code, so it needs checking again if GitHub ever changes where its runners sit.
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # A few hundred HEAD requests at modest concurrency; the real runs (verify_shorts_check.py
+    # from Spain, calibrate_shorts.py's 500-video runs) finished in well under this.
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ingestion
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: ingestion/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Verify the Shorts HEAD check from this runner
+        env:
+          # Read-only: config.py builds its Supabase client from these regardless of
+          # what a given script does with it, so SUPABASE_SECRET_KEY is required to
+          # import config at all, even though this script only ever selects rows from
+          # `videos` -- never writes. YOUTUBE_API_KEY is required by config.py the same
+          # way, for the same reason, despite this script never calling the YouTube Data
+          # API itself: it only sends HEAD requests to youtube.com.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: |
+          set -euo pipefail
+          python check_shorts_from_runner.py

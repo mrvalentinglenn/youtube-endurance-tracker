@@ -45,6 +45,7 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -63,11 +64,27 @@ FRONTEND_ENV_PATH = Path(__file__).resolve().parent.parent / "frontend" / ".env"
 
 
 def build_anon_client():
-    """Reads frontend/.env directly for VITE_SUPABASE_URL / VITE_SUPABASE_PUBLISHABLE_KEY.
-    Not loaded via config.py: no other ingestion script needs the anon key, and config.py's
-    own docstring asks to keep it free of script-specific concerns."""
+    """Reads VITE_SUPABASE_URL / VITE_SUPABASE_PUBLISHABLE_KEY for the anon key. Checks
+    the environment first, then falls back to reading frontend/.env directly -- the
+    original approach, kept for local runs. Not loaded via config.py: no other ingestion
+    script needs the anon key, and config.py's own docstring asks to keep it free of
+    script-specific concerns.
+
+    The environment path exists for GitHub Actions (NEXT_STEPS.md step 12): the runner
+    checks out the repo but frontend/.env is gitignored and never committed, so the file
+    this originally relied on doesn't exist there. The workflow sets these two names
+    directly from secrets instead. Same two values either way -- this only changes where
+    they're read from, never what they are or how they're used below."""
+    env_url = os.environ.get("VITE_SUPABASE_URL")
+    env_key = os.environ.get("VITE_SUPABASE_PUBLISHABLE_KEY")
+    if env_url and env_key:
+        return create_client(env_url, env_key)
+
     if not FRONTEND_ENV_PATH.exists():
-        raise RuntimeError(f"Can't verify: {FRONTEND_ENV_PATH} not found (needed for the anon key).")
+        raise RuntimeError(
+            f"Can't verify: VITE_SUPABASE_URL/VITE_SUPABASE_PUBLISHABLE_KEY are not set, and "
+            f"{FRONTEND_ENV_PATH} was not found either (needed for the anon key)."
+        )
     text = FRONTEND_ENV_PATH.read_text(encoding="utf-8")
     url_match = re.search(r"^VITE_SUPABASE_URL=(.+)$", text, re.MULTILINE)
     key_match = re.search(r"^VITE_SUPABASE_PUBLISHABLE_KEY=(.+)$", text, re.MULTILINE)
