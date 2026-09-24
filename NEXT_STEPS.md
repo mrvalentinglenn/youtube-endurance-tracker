@@ -4,8 +4,6 @@ Working document. Tick off what is done and add new questions as they come up.
 
 ## Open questions
 
-- [ ] **Does "last year" work as the default date filter?** Chosen provisionally. Check once real
-      data is in the database whether it gives a good first impression.
 
 
 - [ ] **A per-channel cutoff for channels onboarded later.** New-video discovery uses the fixed
@@ -15,7 +13,15 @@ Working document. Tick off what is done and add new questions as they come up.
 
 - [ ] **Small refresh.py fixes.** The "pending Shorts classification" count is off by one against
       the classified total (723 vs 725, 11 vs 12); the data is fine, 0 are NULL. Avatars re-upload
-      all 342 every run, about 2.5 minutes; skipping unchanged ones would shorten the run.
+      all 342 every run, about 2.5 minutes; skipping unchanged ones would shorten the run.       In `--test`, the avatar phase samples five different channels from the other phases; still
+      capped at five and read-only, so cosmetic.
+
+- [ ] **Small workflow and repo cleanups.** Bump `actions/checkout@v4` and
+      `actions/setup-python@v5` to their current versions: GitHub warns they target the deprecated
+      Node.js 20. `ubuntu-latest` moves to Ubuntu 26 on 2026-10-19, so the scheduled run of
+      2026-10-22 is the first on it: check that one closely. Add `_qa_screenshots/` to
+      `.gitignore`. Find the example file that made Vercel suggest `YOUTUBE_API_KEY` and
+      `SUPABASE_SECRET_KEY` during deployment, and remove those names if it is under `frontend/`.      
 
 ## Data issues in data/channels_complete.xlsx
 
@@ -239,29 +245,56 @@ Working document. Tick off what is done and add new questions as they come up.
          tooltips on Absolute and Relative. No filter behaviour changed.
 10j. [x] **Suggest a channel.** A header button opens a modal with a channel name and a category,
          sent by email through Web3Forms. Access key in `VITE_WEB3FORMS_ACCESS_KEY`. Tested with
-         intercepted requests plus one real submission. See DECISIONS.md, 2026-09-23.                         
-11. [ ] **Deploy to Vercel** and add the environment variables there: `VITE_SUPABASE_URL`,
-        `VITE_SUPABASE_PUBLISHABLE_KEY` and `VITE_WEB3FORMS_ACCESS_KEY`. Afterwards, in the
-        Web3Forms dashboard, replace the form's website URL `localhost` with the real address,
-        and send one test suggestion from the live site.
+         intercepted requests plus one real submission. See DECISIONS.md, 2026-09-23. 
+10k. [x] **Default date filter: all time.** Was "last year", which hid a Professional Teams video
+         from 2024 and two thirds of the archive by default. "All time" is now the default and
+         stores no `date` param; "last year" is stored explicitly. Step 1 costs the same: 441
+         pages for Influencers, identical to "last year". See DECISIONS.md, 2026-09-25.                                 
+11. [x] **Deploy to Vercel.** Project root `frontend/`, with `frontend/vercel.json` rewriting all
+        routes to `index.html`, so a direct link or a refresh on a category page works. Environment
+        variables: exactly `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` and
+        `VITE_WEB3FORMS_ACCESS_KEY`. Vercel pre-filled other names from an example file during
+        import; they were removed, and the first build came up black because the Supabase
+        variables were missing or misnamed. Variables are baked in at build time, so every change
+        to them needs a redeploy. `VITE_` variables must be type Config, not Secret. Every push to
+        `main` redeploys automatically.
+11a. [ ] **Web3Forms on the live site.** In the Web3Forms dashboard, replace the form's website URL
+         `localhost` with the Vercel address, then send one test suggestion from the live site.
 11b. [ ] **Move Supabase to the free plan.** Planned for roughly 7 to 9 months, then back to a
          paid plan. Before switching: check Supabase's current policy on pausing inactive free
          projects, since a paused database takes the site down, and check that the database
          (374 MB after step 10h) fits the free limits. After switching: note the database size
          after each monthly run, to measure the real growth.
-12. [ ] **GitHub Actions workflow.** Schedule `ingestion/refresh.py` monthly, with the keys in
-        GitHub Secrets, modelled on the Cycling Content Tracker's workflow. Secrets:
-        `YOUTUBE_API_KEY`, the Supabase secret key, `SUPABASE_DB_URL`, and the publishable key for
-        the sentinel check, which reads as `anon`. `psycopg[binary]` is in `requirements.txt`. A run takes about 14 minutes: three views are refreshed since step 10f. Trigger it manually once to confirm it works.
-        Verify the Shorts HEAD check from the runner before trusting it: YouTube's consent redirect
-        is regional, and GitHub's runners sit in US data centres, not in Spain. Run
-        `calibrate_shorts.py` or a known-status set from the runner once, and compare.
+12. [ ] **GitHub Actions workflows.** `.github/workflows/refresh.yml` runs `ingestion/refresh.py`
+        on the 22nd of each month at 03:00 UTC, plus a manual trigger with a `test_mode` input.
+        Python 3.14, timeout 60 minutes, a concurrency group so runs cannot overlap. Five GitHub
+        Secrets: `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `SUPABASE_DB_URL`, `YOUTUBE_API_KEY` and
+        `SUPABASE_PUBLISHABLE_KEY`; the workflow maps the last two to the `VITE_` names the sentinel
+        check reads. `refresh_scoring_view.py` now reads those from the environment first, falling
+        back to `frontend/.env` locally.
+        Shorts check from the runner (`check-shorts-from-runner.yml`, manual, read-only): 200 of
+        200 known-status videos agree, 100 × 200 and 100 × 303, 0 × 302, 0 failures. The US
+        runners get the same answers as Spain.
+        Test run: clean, 11 quota units, no writes. First real run crashed in the channel metadata
+        phase on one "connection reset by peer" from Supabase, before any data was written.
+        Fixed with `ingestion/retry.py`: transient Supabase errors (connection errors, timeouts,
+        57014) and transient YouTube Data API errors (connection errors, 500–504) retry 3 times,
+        2 then 4 seconds; a 403 or any other 4xx fails at once. The Shorts HEAD checks stay
+        retry-free. Tested with `ingestion/test_retry.py`, 9/9.
+        Second real run: succeeded on 2026-09-25 in 13 minutes 49 seconds. 342 channels, 145 new videos
+        (83 Shorts, 18 long-form after the HEAD check, 0 NULL), 20,659 measured, 3 no longer available.
+        Baselines written: 11,371 current (the window moves with today's date), 1,087 era. 843 quota
+        units. Refresh: `videos_scored` 18.5 s, `videos_slim` 3.5 s, `videos_search` 16.5 s. Row counts
+        98,702 in all three views; sentinel matches as `anon`. Check that the scheduled run of 2026-10-22 actually
+        fires. The repository is public, so GitHub disables the schedule after 60 days without a
+        push.
 12b. [ ] **Daily Shorts reclassify workflow.** A short script selecting videos with `is_short`
         NULL, re-running the HEAD check and writing back the result. Scheduled daily via GitHub
         Actions. Same script as backfill phase two (`ingestion/classify_shorts.py`). This is also
         what makes NULL-format videos visible in the app again: the format filter is a required
         choice, so a video with no format matches neither side and is unreachable until this job
-        resolves it. See DECISIONS.md, 2026-09-20. The same runner check as step 12 applies. `fetch_pending_work()` now orders on `video_id`.
+        resolves it. See DECISIONS.md, 2026-09-20.         The runner check of step 12 covers it: the HEAD check works from GitHub's runners.
+        `fetch_pending_work()` orders on `video_id` and its reads now retry transient errors.
 13. [ ] **Polish for the portfolio.** A short "how it works" page explaining the Outlier Score —
         including the known limitation that on channels which grew explosively, older videos still
         score somewhat low — plus a README with screenshots.

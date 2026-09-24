@@ -153,6 +153,10 @@ other.
 
 ## 2026-09-18 — SUPERSEDED: The 30-day run is scheduled, via a daily cron with chunking
 
+**Amended 2026-09-25** by "The GitHub Actions setup" and "Transient errors retry across the
+refresh path". The decision stands; those entries record how it was built and what the first real
+run taught.
+
 **Superseded on 2026-09-18** by "The 30-day run is scheduled via GitHub Actions", after it turned
 out the front end is a static Vite site with no serverless functions. Kept for the reasoning; do not
 implement this.
@@ -182,6 +186,9 @@ used, and a failed run must be visible. Never print the keys. Note that GitHub d
 workflows in a repository that has seen no activity for 60 days.
 
 ## 2026-09-18 — No view modes, only a date filter
+
+**Amended 2026-09-25** by "Default date filter: all time". The filter now opens on "all time",
+not "last year".
 
 **Decision.** The concept of a view mode disappears. The Cycling Content Tracker had a 7-day and a
 90-day view; this app has neither. Time is controlled solely through the publication-date filter,
@@ -1925,3 +1932,96 @@ estimate; the monthly runs will measure the real figure.
 plan, which are not needed. It would also mean rebuilding all three views, and `videos_search`
 would have to compute `fts` itself, putting the search expression in a second place, against the
 rule that the logic lives in `videos_scored_live` only.
+
+## 2026-09-25 — Default date filter: all time
+
+**Decision.** The publication-date filter opens on "all time" instead of "last year". All time is
+stored as no `date` param; every other choice is stored explicitly. This answers the open question
+of whether "last year" gives a good first impression: it did not.
+
+**Why.** The deployed site hid a Professional Teams video from 2024-04-30 under default filters,
+and a search for its title found nothing, because search keeps the other filters active. "Last
+year" hid two thirds of the archive by default, while the era baseline exists precisely to make
+older videos' scores fair.
+
+**What it costs.** Under Absolute, older videos have had more time to collect views, so the
+default ranking leans somewhat towards 2023 and 2024. "Last year" is one click away for anyone
+following trends.
+
+**Measured.** No speed cost: step 1 reads 441 pages for Influencers under "all time", identical
+to "last year", because the slim view is read per category and sorted in memory whatever the date
+condition.
+
+## 2026-09-25 — Vercel: three variables, all public, all Config
+
+**Decision.** The deployed site has exactly three environment variables in Vercel:
+`VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` and `VITE_WEB3FORMS_ACCESS_KEY`, of type
+Config. `frontend/vercel.json` rewrites every route to `index.html`.
+
+**Why only these.** On import, Vercel pre-filled variable names from an example file in the
+repository, including `YOUTUBE_API_KEY` and `SUPABASE_SECRET_KEY`. Everything with a `VITE_`
+prefix is baked into code any visitor can read. Nothing leaked, since the ingestion names had no
+such prefix, but none of them belongs on the hosting side.
+
+**Why Config and not Secret.** All three are public by design, and Vercel refuses the Secret type
+for a `VITE_` name for exactly that reason. Config also lets the value be read back to check it.
+
+**What the first deploy taught.** The site came up black with a missing-variable error: the
+Supabase URL had been saved without its `VITE_` prefix. Vite bakes variables in at build time, so
+fixing them in Vercel does nothing until a redeploy.
+
+**Why vercel.json.** Without it, a direct link to a category page, or a refresh on one, returns a
+404 from Vercel, while the same URL works locally.
+
+## 2026-09-25 — The GitHub Actions setup
+
+**Decision.** `refresh.yml` runs `refresh.py` on the 22nd of each month at 03:00 UTC, plus a
+manual trigger with a `test_mode` input. Python 3.14, matching the local version. Timeout 60
+minutes. A concurrency group, so two refreshes can never overlap. Five secrets; the workflow maps
+`SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` to the `VITE_` names the sentinel check reads.
+
+**Why the 22nd.** The last manual run was on 2026-09-22, so it keeps the rhythm at about 30 days.
+
+**One code change to make it run at all.** The sentinel check read `frontend/.env` as a file.
+That file is gitignored, so it does not exist on a runner, and every scheduled run would have
+failed at its very last step. It now reads the environment first and falls back to the file
+locally.
+
+**The Shorts check works from the US.** The HEAD check was verified from Spain, and YouTube's
+consent redirect is regional. A manual, read-only workflow re-checked 200 known-status videos from
+a runner: 200 agree, 100 × 200 and 100 × 303, 0 × 302, 0 failures.
+
+**The 60-day rule.** The repository is public, so GitHub disables the schedule after 60 days
+without a push, and the scheduled run itself does not reset that clock. No third-party keepalive
+action: checking after quiet periods is enough for now.
+
+## 2026-09-25 — Transient errors retry across the refresh path
+
+**Decision.** Every Supabase call and every YouTube Data API call reachable from `refresh.py` goes
+through one shared helper, `with_retry` in `ingestion/retry.py`. It retries only transient errors:
+connection errors, timeouts and Postgres statement timeout 57014 for Supabase; connection errors,
+timeouts and HTTP 500–504 for YouTube. 3 attempts, waiting 2 then 4 seconds. A 403 (quota), any
+other 4xx, a permission error or a constraint violation fails immediately. The Shorts HEAD checks
+are not covered.
+
+**Why.** The first real run on GitHub crashed in its first phase on a single "connection reset by
+peer" from Supabase, on one of 342 channel updates. Nothing was written and the site kept last
+month's data, so the failure was harmless and loud, as designed. But a monthly run making about
+800 API calls and thousands of database calls will meet such a hiccup regularly, and without
+retries it would fail for no real reason.
+
+**Why only writes safe to repeat.** A retried write may have succeeded the first time. Every
+wrapped write is an update by key or an upsert on a primary or unique key, so doing it twice gives
+the same result. Any write that is not safe to repeat stays unwrapped.
+
+**Why the HEAD checks stay out.** Their failure and 429 counts drive the abort guards. Retrying
+them would hide the signal those guards watch.
+
+**Likely cause, not changed.** The Supabase client uses HTTP/2, which keeps one long-lived
+connection open, and an intermediary resetting it mid-request produces exactly this error. The
+retries handle it, so the client was left as it is.
+
+**Tested.** `ingestion/test_retry.py`, 9 cases: two failures then success; three failures fail
+the run; a non-transient error fails at once; a 503 retries; a 403 does not. Second real run:
+Second real run, 2026-09-25: succeeded in 13 minutes 49 seconds, 843 quota units, all three views
+refreshed and verified, sentinel matching as `anon`.

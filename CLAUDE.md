@@ -57,8 +57,11 @@ Same stack as the Cycling Content Tracker, so the owner stays on familiar ground
 - Vercel for hosting, deployed as a static site with `frontend/` as the project root, and a
   `vercel.json` that rewrites all routes to `index.html` for SPA routing
 - Python for the ingestion scripts (backfill and refresh)
-- GitHub Actions on a schedule to run the ingestion, following the same pattern as the Cycling
-  Content Tracker. Reuse that project's workflow in `.github/workflows/` as a model.
+- GitHub Actions to run the ingestion. `.github/workflows/refresh.yml` runs `ingestion/refresh.py`
+  on the 22nd of each month at 03:00 UTC, and can be started by hand with a `test_mode` input.
+  `.github/workflows/check-shorts-from-runner.yml` is manual and read-only: it re-checks a sample
+  of known-status videos from GitHub's runners, to confirm the Shorts HEAD check still works from
+  there.
 
 **Key handling, following the pattern of the Cycling Content Tracker.** The front end uses only the
 publishable key and reads through a database view, never the tables directly. The secret key exists
@@ -67,19 +70,29 @@ only in the ingestion environment and never appears anywhere under `frontend/`.
 Environment variables: `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` for the front end,
 read via `import.meta.env`, with an explicit error if either is missing. `VITE_WEB3FORMS_ACCESS_KEY` holds the Web3Forms access key for the channel-suggestion form. It is
 public by design. If it is missing, the suggestion button is hidden and a console warning names the
-variable; the rest of the site keeps working. The ingestion scripts use
-the Supabase secret key, `YOUTUBE_API_KEY`, and `SUPABASE_DB_URL` — a direct Postgres connection
-string through Supabase's Session pooler, used with `psycopg` for anything the REST API cannot do or
-cannot finish in time. All three are stored in GitHub Secrets for the scheduled run and in the root
-`.env` for manual runs. The connection string contains the database password: a `@` or other
+variable; the rest of the site keeps working. The ingestion scripts use `SUPABASE_URL`, the Supabase secret key (`SUPABASE_SECRET_KEY`),
+`YOUTUBE_API_KEY`, and `SUPABASE_DB_URL` — a direct Postgres connection string through Supabase's
+Session pooler, used with `psycopg` for anything the REST API cannot do or cannot finish in time.
+The sentinel check in `refresh_scoring_view.py` also reads as `anon`, using `VITE_SUPABASE_URL` and
+`VITE_SUPABASE_PUBLISHABLE_KEY` from the environment first and from `frontend/.env` otherwise.
+Manual runs read the root `.env`. The scheduled run reads five GitHub Secrets: `SUPABASE_URL`,
+`SUPABASE_SECRET_KEY`, `SUPABASE_DB_URL`, `YOUTUBE_API_KEY` and `SUPABASE_PUBLISHABLE_KEY`; the
+workflow maps the last two to the `VITE_` names. The connection string contains the database password: a `@` or other
 reserved character in it must be percent-encoded (`@` becomes `%40`).
 
 `.gitignore` must exclude `.env*`, `node_modules`, `__pycache__`, and any spreadsheet working copies
 other than the one in `data/`.
 
+**Vercel holds exactly three variables:** `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` and
+`VITE_WEB3FORMS_ACCESS_KEY`, of type Config. Everything with a `VITE_` prefix ends up in code any
+visitor can read, so no ingestion secret ever goes into Vercel, whatever it suggests on import.
+Variables are baked in at build time: after changing one, redeploy. Every push to `main`
+redeploys automatically.
+
 **Watch out: GitHub disables scheduled workflows in a repository with no activity for 60 days.**
 With a monthly job this is a real risk, and the job simply goes quiet. Check once after the first
-scheduled run that it actually fired, and keep it in mind after quiet periods.
+scheduled run that it actually fired, and keep it in mind after quiet periods. The repository is public, so the rule applies. A push resets the clock; the scheduled run itself
+does not.
 
 **Disk.** Pro disks auto-scale when usage reaches 90%, but a single large operation can outrun the
 resize. A concurrent refresh of `videos_scored` builds a complete second copy of the view plus
@@ -245,6 +258,15 @@ without refetching.
 and never committed. Log quota usage per run so the owner can see how close a run is to the
 10,000 units per day limit.
 
+**Retries.** Every Supabase call and every YouTube Data API call reachable from `refresh.py` goes
+through `with_retry` in `ingestion/retry.py`. It retries only transient errors — connection errors,
+timeouts, Postgres statement timeout 57014, and HTTP 500–504 from YouTube — 3 attempts, waiting 2
+then 4 seconds, logging the operation and error type, never a key or URL. A 403 (quota), any other
+4xx, a permission error or a constraint violation fails at once. Only writes that are safe to
+repeat are wrapped: updates by key and upserts on a primary or unique key. The Shorts HEAD checks
+are not covered by `retry.py`. Without this, one dropped connection on GitHub's runners ended a
+real run in its first phase.
+
 ## Scoring: the Outlier Score
 
 The score compares a video's performance on the selected metric to the normal level of its own
@@ -376,7 +398,8 @@ Filters the user can combine:
    triathlon, and removes a channel tagged cycling alone. In the category filter, channels carrying none of the selected sports are dimmed, not hidden.
 6. Publication date: last 6 months, last year, last 2 years, last 3 years, all time, or a custom
    period. "All time" means no date restriction on the query: everything in the database.
-   Default on opening the app: last year.
+   Default on opening the app: all time. Stored as no `date` param; any other choice is stored
+explicitly.
 7. Format: Shorts or long-form. This is a required choice, not an optional filter — the two formats
    are never mixed in one grid, because their thumbnails have different aspect ratios and their view
    scales are not comparable. Default: long-form.
@@ -631,3 +654,7 @@ off before. Set a session `statement_timeout` for such
   over `video_id` takes the next cursor from the last row Postgres returned, never from Python's
   `max()`, or orders with `COLLATE "C"`: the two sort strings differently. See DECISIONS.md,
   2026-09-22. 
+- Any new Supabase or YouTube Data API call in a script the scheduled run reaches goes through
+  `with_retry`, with the matching classifier (`is_transient_supabase` or `is_transient_youtube`).
+  Wrap a write only if it is safe to repeat; if it is not, make it so or leave it unwrapped and say
+  why. Tests for the retry behaviour live in `ingestion/test_retry.py`.  
