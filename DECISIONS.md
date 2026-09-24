@@ -153,7 +153,7 @@ other.
 
 ## 2026-09-18 — SUPERSEDED: The 30-day run is scheduled, via a daily cron with chunking
 
-**Amended 2026-09-25** by "The GitHub Actions setup" and "Transient errors retry across the
+**Amended 2026-09-24** by "The GitHub Actions setup" and "Transient errors retry across the
 refresh path". The decision stands; those entries record how it was built and what the first real
 run taught.
 
@@ -187,7 +187,7 @@ workflows in a repository that has seen no activity for 60 days.
 
 ## 2026-09-18 — No view modes, only a date filter
 
-**Amended 2026-09-25** by "Default date filter: all time". The filter now opens on "all time",
+**Amended 2026-09-24** by "Default date filter: all time". The filter now opens on "all time",
 not "last year".
 
 **Decision.** The concept of a view mode disappears. The Cycling Content Tracker had a 7-day and a
@@ -1933,7 +1933,7 @@ plan, which are not needed. It would also mean rebuilding all three views, and `
 would have to compute `fts` itself, putting the search expression in a second place, against the
 rule that the logic lives in `videos_scored_live` only.
 
-## 2026-09-25 — Default date filter: all time
+## 2026-09-24 — Default date filter: all time
 
 **Decision.** The publication-date filter opens on "all time" instead of "last year". All time is
 stored as no `date` param; every other choice is stored explicitly. This answers the open question
@@ -1952,7 +1952,7 @@ following trends.
 to "last year", because the slim view is read per category and sorted in memory whatever the date
 condition.
 
-## 2026-09-25 — Vercel: three variables, all public, all Config
+## 2026-09-24 — Vercel: three variables, all public, all Config
 
 **Decision.** The deployed site has exactly three environment variables in Vercel:
 `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` and `VITE_WEB3FORMS_ACCESS_KEY`, of type
@@ -1973,7 +1973,7 @@ fixing them in Vercel does nothing until a redeploy.
 **Why vercel.json.** Without it, a direct link to a category page, or a refresh on one, returns a
 404 from Vercel, while the same URL works locally.
 
-## 2026-09-25 — The GitHub Actions setup
+## 2026-09-24 — The GitHub Actions setup
 
 **Decision.** `refresh.yml` runs `refresh.py` on the 22nd of each month at 03:00 UTC, plus a
 manual trigger with a `test_mode` input. Python 3.14, matching the local version. Timeout 60
@@ -1995,7 +1995,7 @@ a runner: 200 agree, 100 × 200 and 100 × 303, 0 × 302, 0 failures.
 without a push, and the scheduled run itself does not reset that clock. No third-party keepalive
 action: checking after quiet periods is enough for now.
 
-## 2026-09-25 — Transient errors retry across the refresh path
+## 2026-09-24 — Transient errors retry across the refresh path
 
 **Decision.** Every Supabase call and every YouTube Data API call reachable from `refresh.py` goes
 through one shared helper, `with_retry` in `ingestion/retry.py`. It retries only transient errors:
@@ -2023,5 +2023,74 @@ retries handle it, so the client was left as it is.
 
 **Tested.** `ingestion/test_retry.py`, 9 cases: two failures then success; three failures fail
 the run; a non-transient error fails at once; a 503 retries; a 403 does not. Second real run:
-Second real run, 2026-09-25: succeeded in 13 minutes 49 seconds, 843 quota units, all three views
+Second real run, 2026-09-24: succeeded in 13 minutes 49 seconds, 843 quota units, all three views
 refreshed and verified, sentinel matching as `anon`.
+
+## 2026-09-24 — Healthchecks.io watches the monthly run
+
+**Decision.** A Healthchecks.io check with the workflow's own schedule (`0 3 22 * *`, UTC) and a
+grace time of 1 day. `refresh.yml` pings `/start` before `refresh.py`, and the plain URL on
+success or `/fail` on failure or cancellation. The ping URL is the secret `HEALTHCHECK_PING_URL`.
+
+**Why.** GitHub emails when a run fails, never when it does not run. The 60-day rule can switch
+the schedule off without a sound, and with a monthly job, weeks can pass before anyone notices
+the site is stale. Healthchecks.io reports silence, not just errors. The Cycling Content Tracker
+uses the same setup.
+
+**Why the grace time is a day.** It covers GitHub starting scheduled runs late, which it
+sometimes does by an hour or more, plus the run itself of about 14 minutes.
+
+**Why test runs send no ping.** A test run writes nothing, so it must never count as a refresh.
+
+**Why a ping cannot fail the job.** The job's result is the refresh's result. A failed ping still
+surfaces, as a missing success ping.
+
+**An accepted gap.** A run that fails before its first step, while installing Python or packages,
+sends no `/fail`. It is still covered twice: GitHub emails about the failed job, and the missing
+success ping alerts after the grace day.
+
+## 2026-09-24 — "How it works" is a short modal
+
+**Decision.** A header button opens a modal with three short paragraphs: what the tracker covers,
+the 180-day freeze, and Absolute versus Relative. Written by the owner, deliberately concise.
+
+**Why a modal.** It reuses the "Suggest a channel" pattern, so it needs no route and no new
+component shape.
+
+**Why the 180-day freeze is explained.** A visitor sees view counts that differ from YouTube's.
+Without the explanation, that looks like a bug.
+
+**Why the limitation is left out.** The residual growth bias on fast-growing channels is a
+nuance for someone reading the method, not for someone trying the tool. It is in the README.
+
+**Why "usually points to".** A high relative score is a signal, not proof: the paid-promotion
+cases show it can also come from advertising.
+
+## 2026-09-24 — Mobile: filters in a bottom sheet, icons in the header
+
+**Decision.** Below `md`, the header shows icon-only buttons, and the filter bar is replaced by a
+visible search box, a "Filters" button with a count badge and a summary line, the exclusion chips,
+and a bottom sheet holding the filter controls. At `md` and wider, nothing changed. The header
+moved into one shared `Header` component first.
+
+**Why.** On a phone, the filter bar alone filled a whole screen before the first video appeared.
+
+**Why `md`.** At 768px the desktop layout already fits, so tablets keep it.
+
+**Why the search box stays outside.** It is the one control people reach for directly.
+
+**Why the chips stay outside.** CLAUDE.md requires that an active exclusion never becomes
+invisible. Behind a button, a switched-off channel would silently shape the ranking.
+
+**Why a summary line.** It says what ranking is on screen without opening the sheet.
+
+**Why one instance of the controls.** A second mobile copy of each filter would have to be kept
+in sync forever. The sheet is only a different frame around the same controls.
+
+**Why the header became a component first.** Its markup existed in both pages, so every header
+change had to be made twice, which is how two pages drift apart.
+
+**A bug found while building it.** Tapping "close" with a category dropdown open missed the
+button: the document-level "click outside" handler ran on `mousedown`, closed the dropdown and
+shifted the sheet before the `click` landed. Fixed by stopping `mousedown` on the close and
+"Show results" buttons.

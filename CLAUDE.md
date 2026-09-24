@@ -61,7 +61,10 @@ Same stack as the Cycling Content Tracker, so the owner stays on familiar ground
   on the 22nd of each month at 03:00 UTC, and can be started by hand with a `test_mode` input.
   `.github/workflows/check-shorts-from-runner.yml` is manual and read-only: it re-checks a sample
   of known-status videos from GitHub's runners, to confirm the Shorts HEAD check still works from
-  there.
+  there.   The monthly run is monitored by Healthchecks.io: `refresh.yml` pings `/start` before the run and
+  the plain URL or `/fail` after it, skipping all pings in test mode. A ping never changes the
+  job's outcome. The check alerts by email on a failure, and a day after the 22nd if no run
+  happened at all, which GitHub itself never reports.
 
 **Key handling, following the pattern of the Cycling Content Tracker.** The front end uses only the
 publishable key and reads through a database view, never the tables directly. The secret key exists
@@ -77,7 +80,7 @@ The sentinel check in `refresh_scoring_view.py` also reads as `anon`, using `VIT
 `VITE_SUPABASE_PUBLISHABLE_KEY` from the environment first and from `frontend/.env` otherwise.
 Manual runs read the root `.env`. The scheduled run reads five GitHub Secrets: `SUPABASE_URL`,
 `SUPABASE_SECRET_KEY`, `SUPABASE_DB_URL`, `YOUTUBE_API_KEY` and `SUPABASE_PUBLISHABLE_KEY`; the
-workflow maps the last two to the `VITE_` names. The connection string contains the database password: a `@` or other
+workflow maps the last two to the `VITE_` names. A sixth secret, `HEALTHCHECK_PING_URL`, holds the Healthchecks.io ping URL. The connection string contains the database password: a `@` or other
 reserved character in it must be percent-encoded (`@` becomes `%40`).
 
 `.gitignore` must exclude `.env*`, `node_modules`, `__pycache__`, and any spreadsheet working copies
@@ -484,13 +487,35 @@ from `channels_public`.
 **Filter bar layout.** On laptop and wide screens the filter bar has four lines: the five category
 dropdowns; Sport, Published and Duration side by side, with Duration styled exactly like Published
 (label to the left, down-arrow on the button); Metric, Comparison and Format; the keyword search.
-On smaller screens the lines wrap naturally; there is no separate mobile layout.  
+Below `md` the filter bar is replaced by a mobile layout, described under **Mobile**. 
 
 Each video card shows: thumbnail, title, channel's avatar and name, **publication date**, views, likes and
 comments. Under Relative it also shows the Outlier Score for the selected metric; under Absolute
 no score is shown, because there is no baseline in play. Videos younger than 180 days carry a
 "still growing" label. Clicking through opens the video on YouTube. The avatar is a small round image before the channel name, hidden when `avatar_url` is NULL or the
 image fails to load, and given `alt=""` since the name beside it already says the same thing.
+
+**Header.** One shared `Header` component, used by both routes: the title, then "How it works",
+"Suggest a channel" and the theme toggle. Never duplicate header markup in a page.
+
+**How it works.** A header button opening a modal, built on the same pattern as "Suggest a
+channel". Its three paragraphs were written by the owner: change the wording only when asked.
+
+**Mobile.** Below `md`, and only there:
+- The title is smaller, and the three header buttons are icon-only (question mark, plus,
+  moon/sun), each with an `aria-label` and a `title`, tap targets at least 40×40px.
+- The search box stays visible. Below it, a "Filters" button with a count badge: the number of
+  controls not at their default (metric, comparison, format, date, sports, duration, and all
+  category/subcategory/channel exclusions counted as one; the keyword is not counted, since the
+  search box is visible). Under it, a summary line: format · metric · comparison.
+- The exclusion chips stay visible outside the panel, so an active exclusion never hides.
+- The filter controls open in a bottom sheet with a close button and a sticky "Show results"
+  button. It is the same single instance of the controls as on desktop, never a second copy.
+  Filters apply instantly. The page behind does not scroll; Escape closes the sheet; closing it
+  closes any open dropdown.
+- The close and "Show results" buttons stop `mousedown` from propagating: otherwise the
+  document-level "click outside closes the dropdown" handler fires first, the sheet's layout
+  shifts, and the tap misses the button.
 
 **Score display.** The Outlier Score is shown as a multiple with an explicit `×`, to one decimal:
 `1.2×`, `27.4×`. From 1,000 up the number is abbreviated and keeps the multiplier: `2,447.8`

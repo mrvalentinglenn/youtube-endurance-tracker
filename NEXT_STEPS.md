@@ -21,7 +21,7 @@ Working document. Tick off what is done and add new questions as they come up.
       Node.js 20. `ubuntu-latest` moves to Ubuntu 26 on 2026-10-19, so the scheduled run of
       2026-10-22 is the first on it: check that one closely. Add `_qa_screenshots/` to
       `.gitignore`. Find the example file that made Vercel suggest `YOUTUBE_API_KEY` and
-      `SUPABASE_SECRET_KEY` during deployment, and remove those names if it is under `frontend/`.      
+      `SUPABASE_SECRET_KEY` during deployment, and remove those names if it is under `frontend/`.       Delete `frontend/README.md`, left over from the Vite template.     
 
 ## Data issues in data/channels_complete.xlsx
 
@@ -258,14 +258,14 @@ Working document. Tick off what is done and add new questions as they come up.
         variables were missing or misnamed. Variables are baked in at build time, so every change
         to them needs a redeploy. `VITE_` variables must be type Config, not Secret. Every push to
         `main` redeploys automatically.
-11a. [ ] **Web3Forms on the live site.** In the Web3Forms dashboard, replace the form's website URL
-         `localhost` with the Vercel address, then send one test suggestion from the live site.
+11a. [x] **Web3Forms on the live site.** Website URL in the Web3Forms dashboard changed from
+         `localhost` to the Vercel address; a test suggestion from the live site arrived.
 11b. [ ] **Move Supabase to the free plan.** Planned for roughly 7 to 9 months, then back to a
          paid plan. Before switching: check Supabase's current policy on pausing inactive free
          projects, since a paused database takes the site down, and check that the database
          (374 MB after step 10h) fits the free limits. After switching: note the database size
          after each monthly run, to measure the real growth.
-12. [ ] **GitHub Actions workflows.** `.github/workflows/refresh.yml` runs `ingestion/refresh.py`
+12. [x] **GitHub Actions workflows.** `.github/workflows/refresh.yml` runs `ingestion/refresh.py`
         on the 22nd of each month at 03:00 UTC, plus a manual trigger with a `test_mode` input.
         Python 3.14, timeout 60 minutes, a concurrency group so runs cannot overlap. Five GitHub
         Secrets: `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `SUPABASE_DB_URL`, `YOUTUBE_API_KEY` and
@@ -287,17 +287,29 @@ Working document. Tick off what is done and add new questions as they come up.
         units. Refresh: `videos_scored` 18.5 s, `videos_slim` 3.5 s, `videos_search` 16.5 s. Row counts
         98,702 in all three views; sentinel matches as `anon`. Check that the scheduled run of 2026-10-22 actually
         fires. The repository is public, so GitHub disables the schedule after 60 days without a
-        push.
+        push.         Monitoring: a Healthchecks.io check with the same schedule (`0 3 22 * *`, UTC, grace
+        1 day). `refresh.yml` pings `/start` before the run and the plain URL or `/fail` after it,
+        from the secret `HEALTHCHECK_PING_URL`; test-mode runs send no ping. Verified with a real
+        run on 2026-09-24: started 11:36, OK 11:53, check up.
 12b. [ ] **Daily Shorts reclassify workflow.** A short script selecting videos with `is_short`
         NULL, re-running the HEAD check and writing back the result. Scheduled daily via GitHub
         Actions. Same script as backfill phase two (`ingestion/classify_shorts.py`). This is also
         what makes NULL-format videos visible in the app again: the format filter is a required
         choice, so a video with no format matches neither side and is unreachable until this job
         resolves it. See DECISIONS.md, 2026-09-20.         The runner check of step 12 covers it: the HEAD check works from GitHub's runners.
-        `fetch_pending_work()` orders on `video_id` and its reads now retry transient errors.
-13. [ ] **Polish for the portfolio.** A short "how it works" page explaining the Outlier Score —
-        including the known limitation that on channels which grew explosively, older videos still
-        score somewhat low — plus a README with screenshots.
+        `fetch_pending_work()` orders on `video_id` and its reads now retry transient errors.         When it is built, give it its own Healthchecks.io check, following step 12's pattern.
+13. [x] **Polish for the portfolio.**
+13a. [x] **"How it works" button.** In the header, left of "Suggest a channel", opening a modal
+         with three short paragraphs: what the tracker covers, the 180-day freeze, and Absolute
+         versus Relative. The known limitation for fast-growing channels is left to the README.
+         See DECISIONS.md, 2026-09-24.
+13b. [x] **Mobile header and filters.** Below `md`: a shared `Header` component with icon-only
+         buttons, the search box always visible, the filter controls behind a "Filters" button
+         with a count badge and a one-line summary, opening as a bottom sheet. Exclusion chips stay
+         visible. At `md` and wider, nothing changed. Verified in a real browser across 30 checks.
+         See DECISIONS.md, 2026-09-24.
+13c. [x] **README.** Drafted. Still needed: the live URL at the top, and two screenshots in
+         `docs/`: `screenshot-home.png` and `screenshot-relative.png`.
 
 ## Ideas for later
 
