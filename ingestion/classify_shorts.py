@@ -19,9 +19,15 @@ request failures, or on the running 200/303 split drifting more than 10 points f
 ~82/18 baseline over a full rolling 1,000-video window. The work queue is shuffled before
 processing so that window is a cross-section of channels, not one Shorts-heavy brand's
 contiguous run -- and if it aborts anyway, the report names how many distinct channels the
-offending window covered, so a real signal isn't confused with one channel's output.
+offending window covered, so a real signal isn't confused with one channel's output. An
+abort is signalled the same way a genuine failure is: main() exits non-zero.
+
+Usage:
+    python classify_shorts.py            # classifies every video with is_short IS NULL
+    python classify_shorts.py --test     # a handful of pending videos, real HEAD checks, no writes
 """
 
+import argparse
 import random
 import sys
 import time
@@ -50,6 +56,7 @@ MAX_CONSECUTIVE_FAILURES = 50
 RATIO_WINDOW_SIZE = 1000
 RATIO_DRIFT_THRESHOLD_POINTS = 10
 BASELINE_SHORTS_PCT = 82.0  # roughly 82/18, from both calibration runs (81.8%, 81.2%)
+TEST_SAMPLE_SIZE = 5
 
 
 def fetch_pending_work():
@@ -123,7 +130,7 @@ def update_with_retry(is_short, video_ids):
     )
 
 
-def flush_batch(shorts_ids, long_form_ids):
+def flush_batch(shorts_ids, long_form_ids, test_mode=False):
     """A real UPDATE, not an upsert: upsert goes through INSERT ... ON CONFLICT DO
     UPDATE, and Postgres checks NOT NULL constraints on the proposed insert row before
     it even checks for a conflict -- so a payload with only video_id and is_short fails
@@ -131,7 +138,11 @@ def flush_batch(shorts_ids, long_form_ids):
     updated. .update().in_(...) has no INSERT path, so it can't hit that.
 
     Chunked to keep each request's URL comfortably under typical length limits.
+    test_mode skips the writes entirely -- the HEAD checks above it still run for real
+    (see --test), only the database is left untouched.
     """
+    if test_mode:
+        return
     for chunk in chunked(shorts_ids, UPDATE_CHUNK_SIZE):
         update_with_retry(True, chunk)
     for chunk in chunked(long_form_ids, UPDATE_CHUNK_SIZE):
@@ -151,7 +162,7 @@ def log_progress(processed, total, run_start, shorts_count, long_form_count, tot
     )
 
 
-def process_queue(work_items):
+def process_queue(work_items, test_mode=False):
     session = make_session()
     total = len(work_items)
 
@@ -237,7 +248,7 @@ def process_queue(work_items):
                         break
 
             if processed % WRITE_BATCH_SIZE == 0:
-                flush_batch(shorts_batch_ids, long_form_batch_ids)
+                flush_batch(shorts_batch_ids, long_form_batch_ids, test_mode=test_mode)
                 shorts_batch_ids.clear()
                 long_form_batch_ids.clear()
                 log_progress(processed, total, run_start, shorts_count, long_form_count, sum(failure_counts.values()))
@@ -245,7 +256,7 @@ def process_queue(work_items):
             if aborted_reason is None:
                 submit_next()
 
-    flush_batch(shorts_batch_ids, long_form_batch_ids)  # whatever's left, including a partial batch at abort or the end
+    flush_batch(shorts_batch_ids, long_form_batch_ids, test_mode=test_mode)  # whatever's left, including a partial batch at abort or the end
 
     return {
         "processed": processed,
@@ -258,27 +269,47 @@ def process_queue(work_items):
     }
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Classifies videos with is_short IS NULL via the Shorts HEAD check.")
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Process a handful of the pending videos and print what would be written, "
+             "without touching the database. Still makes real HEAD requests to youtube.com "
+             "for that handful -- only the database writes are skipped.",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     work_items = fetch_pending_work()
     total = len(work_items)
     if total == 0:
-        print("No videos with is_short IS NULL found. Nothing to classify.")
+        print(f"{total} videos pending. Nothing to classify.")
         return
+
+    if args.test:
+        work_items = work_items[:TEST_SAMPLE_SIZE]
+        print(f"--test: processing {len(work_items)} of {total} pending video(s), no database writes.\n")
 
     # Shuffled so a rolling 1,000-video window is a cross-section of channels, not one
     # channel's contiguous run (which would legitimately have a lopsided Shorts ratio).
     random.shuffle(work_items)
 
-    print(f"Classifying {total} videos at concurrency {CONCURRENCY}.", flush=True)
+    print(f"Classifying {len(work_items)} videos at concurrency {CONCURRENCY}.", flush=True)
 
-    stats = process_queue(work_items)
+    stats = process_queue(work_items, test_mode=args.test)
+
+    written_word = "would write" if args.test else "written"
 
     print("\n--- Summary ---")
     if stats["aborted_reason"]:
         print(f"ABORTED: {stats['aborted_reason']}")
-    print(f"Processed: {stats['processed']}/{total}")
-    print(f"Classified as Shorts: {stats['shorts_count']}")
-    print(f"Classified as long-form: {stats['long_form_count']}")
+    print(f"Processed: {stats['processed']}/{len(work_items)}")
+    print(f"Classified as Shorts, {written_word}: {stats['shorts_count']}")
+    print(f"Classified as long-form, {written_word}: {stats['long_form_count']}")
     print(f"Left NULL (inconclusive): {stats['inconclusive_count']}")
     total_failures = sum(stats["failure_counts"].values())
     print(f"Failures: {total_failures}")

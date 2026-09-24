@@ -1,0 +1,126 @@
+name: Daily Shorts reclassify
+
+# NEXT_STEPS.md step 12b. Runs ingestion/classify_shorts.py over every video with
+# is_short IS NULL -- the same script backfill phase two and the monthly refresh use,
+# unchanged here. The work queue is "is_short IS NULL" itself, so this is naturally
+# resumable and catches anything a previous run left NULL (a failed HEAD check, or
+# whatever the monthly refresh's own in-run retries didn't clear).
+#
+# Two ways to start a run:
+#   - schedule: the daily automated run, at 05:00 UTC.
+#   - workflow_dispatch: a manual run from the Actions tab, with a test_mode checkbox
+#     that runs `classify_shorts.py --test` instead of a real run (a handful of pending
+#     videos, real HEAD checks, no writes) -- for confirming the workflow itself works
+#     without touching the database.
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "Test mode: classify_shorts.py --test (a handful of videos, no writes)"
+        required: false
+        type: boolean
+        default: true
+
+# Named, not auto-generated from the branch/event, and its own group -- separate from
+# monthly-refresh, so a daily reclassify run and a monthly refresh run are free to
+# overlap (they touch is_short independently) while two reclassify runs still can't.
+# cancel-in-progress stays false, matching refresh.yml: a run stopped mid-batch is worse
+# than a second run simply waiting.
+concurrency:
+  group: daily-shorts-reclassify
+  cancel-in-progress: false
+
+jobs:
+  reclassify:
+    runs-on: ubuntu-latest
+    # A full run over every NULL video is bounded by the abort guards (a 429, more than
+    # 50 consecutive failures, or the drift guard) long before 30 minutes; a run
+    # approaching that is a hung job, not a slow one.
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ingestion
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Matches the version this project runs locally.
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: ingestion/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Healthchecks.io monitoring, same pattern as refresh.yml: /start before the real
+      # run, then either a plain ping (success) or /fail (failure or cancellation) after.
+      # Skipped entirely in test mode -- a test run must never count as a real reclassify
+      # -- and skipped with a log warning, not a failure, if the secret was never
+      # configured. None of the ping steps can affect the job's own result:
+      # continue-on-error: true, and curl's own timeout/retries keep a slow or
+      # unreachable healthcheck endpoint from ever being the reason this job is red.
+      - name: Check for Healthchecks.io ping URL
+        if: inputs.test_mode != true
+        id: healthcheck
+        env:
+          PING_URL: ${{ secrets.HEALTHCHECK_RECLASSIFY_PING_URL }}
+        run: |
+          if [ -z "$PING_URL" ]; then
+            echo "::warning::HEALTHCHECK_RECLASSIFY_PING_URL is not set -- skipping Healthchecks.io pings for this run."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ping Healthchecks.io (start)
+        if: inputs.test_mode != true && steps.healthcheck.outputs.enabled == 'true'
+        continue-on-error: true
+        env:
+          PING_URL: ${{ secrets.HEALTHCHECK_RECLASSIFY_PING_URL }}
+        run: curl -fsS -m 10 --retry 3 "$PING_URL/start"
+
+      - name: Run the Shorts reclassify
+        env:
+          # Read from GitHub's encrypted secret store at run time, never hardcoded here.
+          # GitHub automatically masks any of these values if they appear in the log --
+          # including inside an error message -- so a failure elsewhere in the run can't
+          # leak them just by printing an exception. SUPABASE_DB_URL is deliberately not
+          # passed: this script only ever goes through the Supabase REST client (config.py's
+          # `supabase`), never the direct Postgres connection. YOUTUBE_API_KEY is required
+          # even though this script never calls the YouTube Data API itself -- config.py
+          # checks for it at import time regardless, the same way check-shorts-from-runner.yml
+          # already needs it.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: |
+          # set -e: if classify_shorts.py exits non-zero -- including on an abort (a 429,
+          # more than 50 consecutive failures, or the drift guard) -- this step (and the
+          # whole run) is reported as failed, which is what makes it show red and trigger
+          # GitHub's own email notification.
+          set -euo pipefail
+
+          if [ "${{ inputs.test_mode }}" = "true" ]; then
+            python classify_shorts.py --test
+          else
+            python classify_shorts.py
+          fi
+
+      - name: Ping Healthchecks.io (success)
+        if: inputs.test_mode != true && steps.healthcheck.outputs.enabled == 'true' && success()
+        continue-on-error: true
+        env:
+          PING_URL: ${{ secrets.HEALTHCHECK_RECLASSIFY_PING_URL }}
+        run: curl -fsS -m 10 --retry 3 "$PING_URL"
+
+      - name: Ping Healthchecks.io (failure)
+        if: inputs.test_mode != true && steps.healthcheck.outputs.enabled == 'true' && (failure() || cancelled())
+        continue-on-error: true
+        env:
+          PING_URL: ${{ secrets.HEALTHCHECK_RECLASSIFY_PING_URL }}
+        run: curl -fsS -m 10 --retry 3 "$PING_URL/fail"
